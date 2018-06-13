@@ -1,0 +1,112 @@
+%{
+    use constant {
+        TL_TYPES => 0,
+        TL_FUNCS => 1,
+    };
+    our $tl_context = TL_TYPES;
+%}
+
+%token NUM
+%token LC_ID
+%token UC_ID
+%token ID_HASH 
+%token FUNCTIONS TYPES 
+
+%start program
+
+%left '.'
+
+%%
+
+type_term: type_id { { name => $_[1] } }
+        | '!' type_id { { name => $_[2], bang => 1 } }
+        | type_id '<' tpar_list '>' { { name => $_[1], t_args => $_[3], template => 1 } }
+        ;    
+
+tpar_list: type_id { [ $_[1] ] }
+        | tpar_list ',' type_id { [ @$_[1], $_[3] ] }
+        ;
+
+type_id: full_id | '#' { "nat"; } ;
+
+full_id:  LC_ID
+        | LC_ID '.' LC_ID { $_[1] .".". $_[3] }
+        | UC_ID
+        | LC_ID '.' UC_ID { $_[1] .".". $_[3] }
+        ;
+
+
+program: declarations
+        {
+            print "Whole schema parsed\n";
+        }
+        ;
+
+declarations: /* empty */
+        | declarations declaration
+        ;
+
+declaration: combinator
+        | functions_separator
+        | types_separator
+        ;
+
+functions_separator: FUNCTIONS
+        {
+            $tl_context = TL_FUNCS;
+            print "functions!\n";
+        }
+        ;
+
+types_separator: TYPES
+        {
+            $tl_context = TL_TYPES;
+            print "types!\n";
+        }
+        ;
+
+combinator: full_id opt_hash opt_args args '=' result_type ';'
+        {
+            if ($tl_context == TL_TYPES) {
+                push @{$_[0]->YYData->{types}}, { id => $_[1], hash => $_[2], type => $_[6], args => $_[4] };
+            }
+            else {
+                push @{$_[0]->YYData->{funcs}}, { id => $_[1], hash => $_[2], type => $_[6], args => $_[4] };
+            }
+        }
+        ;
+
+opt_hash: /* empty */ { 0; }
+        | ID_HASH
+        ;
+
+opt_args: /* empty */
+        | '{' args '}'
+        ;
+
+args: /* empty */ { [] }
+    | args arg { push @{$_[1]}, $_[2]; $_[1] }
+    ;
+
+arg: LC_ID ':' type_term { { name => $_[1], type => $_[3] } }
+        | LC_ID ':' condition '?' type_term { { name => $_[1], cond => $_[5], type => $_[3] } }
+        | UC_ID ':' type_term { { name => $_[1], type => $_[3] } }
+        | type_term { { type => $_[1] } }
+        | '[' LC_ID ']' { { type => $_[2], mult => 1 } }
+        ;
+
+condition: LC_ID bit_selector { { name => $_[1], bitmask => $_[2] } }
+        ;
+
+bit_selector: /* empty */ { -1; }
+        | '.' NUM { 1 << $_[2]; }
+        ;
+
+result_type: type_term opt_params;
+
+opt_params: /* empty */
+        | opt_params LC_ID
+        ;
+
+%%
+
