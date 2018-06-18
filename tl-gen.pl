@@ -62,7 +62,7 @@ $parser->YYParse(
 # Vector templates
 for my $type (@{$parser->YYData->{types}}) {
     for my $arg (@{$type->{args}}) {
-        if ($arg->{type}{name} eq 'Vector' and exists $arg->{type}{t_args}) {
+        if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
             $arg->{type}{name} = $arg->{type}{t_args}[0];
             $arg->{type}{vector} = 1;
             delete $arg->{type}{template};
@@ -78,9 +78,13 @@ print Dumper(\@types);
 for my $type (@types) {
     my $constr = ucfirst $type->{id};
     my $hash = $type->{hash}; # crc
+    $hash =~ s/^\#//;
 
     open my $f, ">auto/$constr.pm" or die "$!";
-    print $f "Package $constr;\n\n";
+    print $f "package $constr;\nuse base TLObject;\n\n";
+
+    print $f "our \$parent = '$type->{type}{name}';\n";
+    print $f "our \$hash = 0x$hash;\n\n";
 
     my %argtypes = map { ucfirst($_) => undef } 
         grep { !exists $builtin{$_} } 
@@ -91,25 +95,67 @@ for my $type (@types) {
     print $f "use $_;\n" for keys %argtypes;
     print $f "\n# subs\n";
 
+    print $f "sub new\n{\nreturn bless {};\n}\n\n";
+
     print $f "sub pack\n{\n";
-    
+    print $f "  my \$self = shift;\n";
+    print $f "  my \@stream;\n";
+    print $f "  local \$_;\n";
+
+    print $f "  push \@stream, pack( 'L<', \$hash );\n";
     for my $arg (@{$type->{args}}) {
         if (exists $arg->{type}{vector}) {
-            print $f "  pack scalar \@{\$self->{$arg->{name}}};\n";
-            print $f "  \$_->pack for (\@{\$self->{$arg->{name}}});\n";
+            print $f "  push \@stream, pack('L<', 0x1cb5c415);\n";
+            print $f "  push \@stream, pack('L<', scalar \@{\$self->{$arg->{name}}});\n";
+            if (exists $builtin{$arg->{type}{name}}) {
+                print $f "  push \@stream, \$self->SUPER::pack_$arg->{type}{name}( \$_ ) for \@{\$self->{$arg->{name}}};\n"
+            }
+            else {
+                print $f "  push \@stream, \$_->pack() for \@{\$self->{$arg->{name}}};\n"
+            }
         }
         else {
             if (exists $builtin{$arg->{type}{name}}) {
-                print $f "  pack_$arg->{type}{name} \$self->{$arg->{name}};\n"
+                print $f "  push \@stream, \$self->SUPER::pack_$arg->{type}{name}( \$self->{$arg->{name}} );\n"
             }
             else {
-                print $f "  \$self->{$arg->{name}}->pack;\n"; 
+                print $f "  push \@stream, \$self->{$arg->{name}}->pack();\n"; 
             }
         }
     }
+    print $f "  return \@stream;\n";
+    print $f "}\n\n";
 
-    print $f "}\n";
+    print $f "sub unpack\n{\n";
+    print $f "  my (\$class, \$stream) = \@_;\n";
+    print $f "  local \$_;\n";
+    print $f "  my \@_v;\n";
+    print $f "  my \$self = bless {};\n";
 
+    for my $arg (@{$type->{args}}) {
+        if (exists $arg->{type}{vector}) {
+            print $f "  shift \@\$stream; #0x1cb5c415\n";
+            print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
+            print $f "  \@_v = ();\n";
+            if (exists $builtin{$arg->{type}{name}}) {
+                print $f "  push \@_v, \$self->SUPER::unpack_$arg->{type}{name}( \$stream ) while (\$_--);\n";
+            }
+            else {
+                print $f "  push \@_v, \$self->SUPER::unpack_obj( \$stream ) while (\$_--); # $arg->{type}{name}\n";
+            }
+            print $f "  \$self->{$arg->{name}} = [ \@_v ];\n";
+        }
+        else {
+            if (exists $builtin{$arg->{type}{name}}) {
+                print $f "  \$self->{$arg->{name}} = \$self->SUPER::unpack_$arg->{type}{name}( \$stream );\n";
+            }
+            else {
+                print $f "  \$self->{$arg->{name}} = \$self->SUPER::unpack_obj( \$stream ); # $arg->{type}{name}\n";
+            }
+        }
+    }
+    print $f "return \$self;\n}\n\n";
+    
     print $f "\n1;\n";
 }
 
