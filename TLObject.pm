@@ -43,6 +43,10 @@ sub pack_string
         my $padded = (($len + 4) & 0xfffffffc) - 1;
         $_ = pack "C a$padded", $len, $_[1];
     }
+    else {
+        my $padded = (($len + 3) & 0xfffffffc);
+        $_ = pack "L< a$padded", (($len << 8) | 254), $_[1];
+    }
 
     unpack "(a4)*";
 }
@@ -52,6 +56,10 @@ sub unpack_string
     my ($self, $stream) = @_;
     my $head = shift @$stream;
     my ($len, $str) = unpack "C a3", $head;
+    if ($len == 254) {
+        $len = unpack "L<", $str."\0";
+        $str = '';
+    }
     if ($len > 3) {
         my $tailnum = $len / 4;
         my @tail = splice( @$stream, 0, $tailnum );
