@@ -70,12 +70,18 @@ KEY_END
 
 my @skeys = ($keystr1, $keystr2, $keystr3, $keystr4, $keystr5);
 
-for my $k (@skeys) {
-    my $key = Crypt::OpenSSL::RSA->new_public_key($k);
-    my ($n, $e) = $key->get_key_parameters;
+sub key_fingerprint
+{
+    my $k = shift;
+    my ($n, $e) = $k->get_key_parameters;
     my $data = pack "(a4)*", map { TLObject->pack_bytes($_->to_bin) } ($n, $e);
     my $fp = sha1( $data );
-    $keys{unpack("Q<", substr($fp, -8))} = $key;
+    return unpack("Q<", substr($fp, -8));
+}
+
+for my $k (@skeys) {
+    my $key = Crypt::OpenSSL::RSA->new_public_key($k);
+    $keys{key_fingerprint($key)} = $key;
 }
 
 sub get_keys
