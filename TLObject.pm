@@ -87,4 +87,21 @@ sub unpack_int128
     return Crypt::OpenSSL::Bignum->new_from_bin( pack( "(a4)*", @int128 ) );
 }
 
+sub pack_int256
+{
+    local $_;
+    $_ = $_[1]->to_bin();
+    my $prepend = 32 - length $_;
+    $_ = "\0"x$prepend . $_;
+    unpack "(a4)*";
+}
+
+sub unpack_int256
+{
+    local $_;
+    my ($self, $stream) = @_;
+    my @int256 = splice @$stream, 0, 8;
+    return Crypt::OpenSSL::Bignum->new_from_bin( pack( "(a4)*", @int256 ) );
+}
+
 1;

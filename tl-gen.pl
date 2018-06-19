@@ -72,9 +72,11 @@ for my $type (@{$parser->YYData->{types}}) {
 }
 
 my @types = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{types}};
+my @funcs = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{funcs}};
 
 print Dumper(\@types);
 
+push @types, @funcs;
 for my $type (@types) {
     my $constr = ucfirst $type->{id};
     my $hash = $type->{hash}; # crc
