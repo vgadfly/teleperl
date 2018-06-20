@@ -159,5 +159,17 @@ for my $type (@types) {
     print $f "return \$self;\n}\n\n";
     
     print $f "\n1;\n";
+    close $f;
 }
 
+open my $f, ">TLTable.pm" or die "$!";
+
+print $f "package TLTable;\nour %tl_type = (\n";
+for my $type (@types) {
+    my $constr = ucfirst $type->{id};
+    my $hash = $type->{hash}; # crc
+    $hash =~ s/^\#//;
+    print $f "  0x$hash => '$constr',\n";
+}
+print $f ");\n1;\n";
+close $f;

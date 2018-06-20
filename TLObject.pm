@@ -112,4 +112,15 @@ sub unpack_int256
     return Crypt::OpenSSL::Bignum->new_from_bin( pack( "(a4)*", @int256 ) );
 }
 
+sub unpack_obj
+{
+    use TLTable;
+    my ($self, $stream) = @_;
+    my $hash = unpack( "L<", shift @$stream );
+    if (exists $TLTable::tl_type{$hash}) {
+        require $TLTable::tl_type{$hash}.".pm";
+        return $TLTable::tl_type{$hash}->unpack($stream);
+    }
+    return undef;
+}
 1;
