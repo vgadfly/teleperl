@@ -118,7 +118,9 @@ sub unpack_obj
     my ($self, $stream) = @_;
     my $hash = unpack( "L<", shift @$stream );
     if (exists $TLTable::tl_type{$hash}) {
-        require $TLTable::tl_type{$hash}.".pm";
+        my $pm = $TLTable::tl_type{$hash};
+        $pm =~ s/::/\//g;
+        require $pm.".pm";
         return $TLTable::tl_type{$hash}->unpack($stream);
     }
     return undef;

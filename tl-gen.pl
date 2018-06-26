@@ -4,10 +4,12 @@ use strict;
 use warnings;
 
 use Data::Dumper;
+use File::Basename;
+use File::Path qw( make_path );
 use TL;
 
 my %builtin = map {$_ => undef} 
-qw( string bytes int long int128 int256 double Bool true date );
+qw( string bytes int long int128 int256 double Bool true date Object );
 
 sub _lex 
 {
@@ -44,6 +46,8 @@ my $parser = TL->new;
 $parser->YYData->{types} = [];
 $parser->YYData->{funcs} = [];
 
+my $prefix = shift @ARGV;
+
 my $input;
 {
     local $/ = undef;
@@ -56,6 +60,20 @@ $parser->YYParse(
     yylex => \&_lex, yyerror => sub {
         print "Unexpected ".$_[0]->YYCurtok.", expecting one of:".join(',', $_[0]->YYExpect)."\n";
     } ) or die;
+
+sub pkgname($$)
+{
+    my $prefix = shift;
+    my @chunks = map { join '', map {ucfirst} split /_/ } split /\./, shift;
+    
+    unshift @chunks, $prefix if $prefix;
+    my $path = join('/', @chunks).'.pm';
+    my $pkg = join('::', @chunks);
+    if ( wantarray ) {
+        return ($path, $pkg);
+    }
+    return $pkg;
+}
 
 # class generator
 
@@ -70,34 +88,50 @@ for my $type (@{$parser->YYData->{types}}) {
         }
     }
 }
+for my $type (@{$parser->YYData->{funcs}}) {
+    for my $arg (@{$type->{args}}) {
+        if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
+            $arg->{type}{name} = $arg->{type}{t_args}[0];
+            $arg->{type}{vector} = 1;
+            delete $arg->{type}{template};
+            delete $arg->{type}{t_args};
+        }
+    }
+}
 
 my @types = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{types}};
 my @funcs = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{funcs}};
 
-print Dumper(\@types);
+#print Dumper(\@types);
 
 push @types, @funcs;
 for my $type (@types) {
-    my $constr = ucfirst $type->{id};
+    my ($path, $pkg) = pkgname($prefix, $type->{id});
     my $hash = $type->{hash}; # crc
     $hash =~ s/^\#//;
+    
+    print "Generating $pkg in $path\n";
+    make_path(dirname($path)); 
+    open my $f, ">$path" or die "$!";
+    print $f "package $pkg;\nuse base TLObject;\n\n";
 
-    open my $f, ">auto/$constr.pm" or die "$!";
-    print $f "package $constr;\nuse base TLObject;\n\n";
-
-    print $f "our \$parent = '$type->{type}{name}';\n";
+    print $f "our \$parent = '".pkgname($prefix, $type->{type}{name})."';\n";
     print $f "our \$hash = 0x$hash;\n\n";
 
-    my %argtypes = map { ucfirst($_) => undef } 
+    my %argtypes = map { scalar pkgname($prefix, $_) => undef } 
         grep { !exists $builtin{$_} } 
-        map { $_->{type}{name}} 
+        map { $_->{type}{name} } 
         @{$type->{args}};
+
+    my @params = map { $_->{name} } @{$type->{args}};
 
     print $f "# used types\n";
     print $f "use $_;\n" for keys %argtypes;
+
+    print $f "use fields qw( ". join( " ", @params )." );\n";
     print $f "\n# subs\n";
 
-    print $f "sub new\n{\nreturn bless {};\n}\n\n";
+    print $f "sub new\n{\n  my \$class = shift;\n  return fields::new( ref \$class || \$class );\n}\n\n";
 
     print $f "sub pack\n{\n";
     print $f "  my \$self = shift;\n";
@@ -106,6 +140,7 @@ for my $type (@types) {
 
     print $f "  push \@stream, pack( 'L<', \$hash );\n";
     for my $arg (@{$type->{args}}) {
+        print "$pkg: anonymous parameter of type $arg->{type}{name}!\n" unless exists $arg->{name} and defined $arg->{name};
         if (exists $arg->{type}{vector}) {
             print $f "  push \@stream, pack('L<', 0x1cb5c415);\n";
             print $f "  push \@stream, pack('L<', scalar \@{\$self->{$arg->{name}}});\n";
@@ -132,7 +167,7 @@ for my $type (@types) {
     print $f "  my (\$class, \$stream) = \@_;\n";
     print $f "  local \$_;\n";
     print $f "  my \@_v;\n";
-    print $f "  my \$self = bless {};\n";
+    print $f "  my \$self = fields::new(\$class);\n";
 
     for my $arg (@{$type->{args}}) {
         if (exists $arg->{type}{vector}) {
@@ -156,7 +191,7 @@ for my $type (@types) {
             }
         }
     }
-    print $f "return \$self;\n}\n\n";
+    print $f "  return \$self;\n}\n\n";
     
     print $f "\n1;\n";
     close $f;
@@ -166,10 +201,10 @@ open my $f, ">TLTable.pm" or die "$!";
 
 print $f "package TLTable;\nour %tl_type = (\n";
 for my $type (@types) {
-    my $constr = ucfirst $type->{id};
+    my $pkg = pkgname($prefix, $type->{id});
     my $hash = $type->{hash}; # crc
     $hash =~ s/^\#//;
-    print $f "  0x$hash => '$constr',\n";
+    print $f "  0x$hash => '$pkg',\n";
 }
 print $f ");\n1;\n";
 close $f;
