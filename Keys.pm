@@ -5,7 +5,7 @@ use strict;
 
 use Crypt::OpenSSL::RSA;
 use Digest::SHA qw(sha1 sha256);
-use TLObject;
+use TL::Object;
 
 my %keys;
 
@@ -74,7 +74,7 @@ sub key_fingerprint
 {
     my $k = shift;
     my ($n, $e) = $k->get_key_parameters;
-    my $data = pack "(a4)*", map { TLObject->pack_bytes($_->to_bin) } ($n, $e);
+    my $data = pack "(a4)*", map { TL::Object::pack_bytes($_->to_bin) } ($n, $e);
     my $fp = sha1( $data );
     return unpack("Q<", substr($fp, -8));
 }

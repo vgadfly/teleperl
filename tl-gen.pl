@@ -113,7 +113,7 @@ for my $type (@types) {
     print "Generating $pkg in $path\n";
     make_path(dirname($path)); 
     open my $f, ">$path" or die "$!";
-    print $f "package $pkg;\nuse base TLObject;\n\n";
+    print $f "package $pkg;\nuse base TL::Object;\n\n";
 
     print $f "our \$parent = '".pkgname($prefix, $type->{type}{name})."';\n";
     print $f "our \$hash = 0x$hash;\n\n";
@@ -145,7 +145,7 @@ for my $type (@types) {
             print $f "  push \@stream, pack('L<', 0x1cb5c415);\n";
             print $f "  push \@stream, pack('L<', scalar \@{\$self->{$arg->{name}}});\n";
             if (exists $builtin{$arg->{type}{name}}) {
-                print $f "  push \@stream, \$self->SUPER::pack_$arg->{type}{name}( \$_ ) for \@{\$self->{$arg->{name}}};\n"
+                print $f "  push \@stream, TL::Object::pack_$arg->{type}{name}( \$_ ) for \@{\$self->{$arg->{name}}};\n"
             }
             else {
                 print $f "  push \@stream, \$_->pack() for \@{\$self->{$arg->{name}}};\n"
@@ -153,7 +153,7 @@ for my $type (@types) {
         }
         else {
             if (exists $builtin{$arg->{type}{name}}) {
-                print $f "  push \@stream, \$self->SUPER::pack_$arg->{type}{name}( \$self->{$arg->{name}} );\n"
+                print $f "  push \@stream, TL::Object::pack_$arg->{type}{name}( \$self->{$arg->{name}} );\n"
             }
             else {
                 print $f "  push \@stream, \$self->{$arg->{name}}->pack();\n"; 
@@ -175,19 +175,19 @@ for my $type (@types) {
             print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
             print $f "  \@_v = ();\n";
             if (exists $builtin{$arg->{type}{name}}) {
-                print $f "  push \@_v, \$self->SUPER::unpack_$arg->{type}{name}( \$stream ) while (\$_--);\n";
+                print $f "  push \@_v, TL::Object::unpack_$arg->{type}{name}( \$stream ) while (\$_--);\n";
             }
             else {
-                print $f "  push \@_v, \$self->SUPER::unpack_obj( \$stream ) while (\$_--); # $arg->{type}{name}\n";
+                print $f "  push \@_v, TL::Object::unpack_obj( \$stream ) while (\$_--); # $arg->{type}{name}\n";
             }
             print $f "  \$self->{$arg->{name}} = [ \@_v ];\n";
         }
         else {
             if (exists $builtin{$arg->{type}{name}}) {
-                print $f "  \$self->{$arg->{name}} = \$self->SUPER::unpack_$arg->{type}{name}( \$stream );\n";
+                print $f "  \$self->{$arg->{name}} = TL::Object::unpack_$arg->{type}{name}( \$stream );\n";
             }
             else {
-                print $f "  \$self->{$arg->{name}} = \$self->SUPER::unpack_obj( \$stream ); # $arg->{type}{name}\n";
+                print $f "  \$self->{$arg->{name}} = TL::Object::unpack_obj( \$stream ); # $arg->{type}{name}\n";
             }
         }
     }
@@ -197,9 +197,9 @@ for my $type (@types) {
     close $f;
 }
 
-open my $f, ">TLTable.pm" or die "$!";
+open my $f, ">$prefix/ObjTable.pm" or die "$!";
 
-print $f "package TLTable;\nour %tl_type = (\n";
+print $f "package ".$prefix."::ObjTable;\nour %tl_type = (\n";
 for my $type (@types) {
     my $pkg = pkgname($prefix, $type->{id});
     my $hash = $type->{hash}; # crc

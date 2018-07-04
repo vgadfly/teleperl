@@ -1,4 +1,4 @@
-package TLObject;
+package TL::Object;
 
 use 5.012;
 
@@ -7,28 +7,34 @@ use strict;
 
 use Crypt::OpenSSL::Bignum;
 
+=head1 SYNOPSYS
+
+  Provides bare types pack/unpack.
+
+=cut
+
 sub pack_int
 {
-    pack "L<", $_[1];
+    pack "L<", $_[0];
 }
 
 sub unpack_int
 {
-    my ($self, $stream) = @_;
+    my $stream = shift;
     unpack "L<", shift @$stream;
 }
 
 sub pack_long
 {
     local $_;
-    $_ = pack "Q<", $_[1];
+    $_ = pack "Q<", $_[0];
 
     unpack "(a4)*";
 }
 
 sub unpack_long
 {
-    my ($self, $stream) = @_;
+    my $stream = shift;
     my $lw = shift @$stream;
     my $hw = shift @$stream;
     unpack "Q<", pack ("(a4)*", $lw, $hw);
@@ -37,15 +43,15 @@ sub unpack_long
 sub pack_string
 {
     local $_;
-    my $len = length $_[1];
+    my $len = length $_[0];
     
     if ($len < 254) {
         my $padded = (($len + 4) & 0xfffffffc) - 1;
-        $_ = pack "C a$padded", $len, $_[1];
+        $_ = pack "C a$padded", $len, $_[0];
     }
     else {
         my $padded = (($len + 3) & 0xfffffffc);
-        $_ = pack "L< a$padded", (($len << 8) | 254), $_[1];
+        $_ = pack "L< a$padded", (($len << 8) | 254), $_[0];
     }
 
     unpack "(a4)*";
@@ -53,7 +59,7 @@ sub pack_string
 
 sub unpack_string
 {
-    my ($self, $stream) = @_;
+    my $stream = shift;
     my $head = shift @$stream;
     my ($len, $str) = unpack "C a3", $head;
     if ($len == 254) {
@@ -81,7 +87,7 @@ sub unpack_bytes
 sub pack_int128
 {
     local $_;
-    $_ = $_[1]->to_bin();
+    $_ = $_[0]->to_bin();
     my $prepend = 16 - length $_;
     $_ = "\0"x$prepend . $_;
     unpack "(a4)*";
@@ -90,7 +96,7 @@ sub pack_int128
 sub unpack_int128
 {
     local $_;
-    my ($self, $stream) = @_;
+    my $stream = shift;
     my @int128 = splice @$stream, 0, 4;
     return Crypt::OpenSSL::Bignum->new_from_bin( pack( "(a4)*", @int128 ) );
 }
@@ -98,7 +104,7 @@ sub unpack_int128
 sub pack_int256
 {
     local $_;
-    $_ = $_[1]->to_bin();
+    $_ = $_[0]->to_bin();
     my $prepend = 32 - length $_;
     $_ = "\0"x$prepend . $_;
     unpack "(a4)*";
@@ -107,21 +113,21 @@ sub pack_int256
 sub unpack_int256
 {
     local $_;
-    my ($self, $stream) = @_;
+    my $stream = shift;
     my @int256 = splice @$stream, 0, 8;
     return Crypt::OpenSSL::Bignum->new_from_bin( pack( "(a4)*", @int256 ) );
 }
 
 sub unpack_obj
 {
-    use TLTable;
-    my ($self, $stream) = @_;
+    use MTProto::ObjTable;
+    my $stream = shift;
     my $hash = unpack( "L<", shift @$stream );
-    if (exists $TLTable::tl_type{$hash}) {
-        my $pm = $TLTable::tl_type{$hash};
+    if (exists $MTProto::ObjTable::tl_type{$hash}) {
+        my $pm = $MTProto::ObjTable::tl_type{$hash};
         $pm =~ s/::/\//g;
         require $pm.".pm";
-        return $TLTable::tl_type{$hash}->unpack($stream);
+        return $MTProto::ObjTable::tl_type{$hash}->unpack($stream);
     }
     return undef;
 }
