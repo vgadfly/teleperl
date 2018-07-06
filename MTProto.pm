@@ -23,6 +23,14 @@ use MTProto::ClientDHInnerData;
 
 use Keys;
 
+sub msg_id
+{
+    my $time = time;
+    my $hi = int( $time );
+    my $lo = int ( ( $time - $hi ) * 2**32 );
+    return pack( "(LL)<", $lo, $hi );
+}
+
 sub aes_ige_enc
 {
     my ($plain, $key, $iv) = @_;
@@ -233,7 +241,14 @@ sub save_session
 ## send unencrypted message
 sub send_plain
 {
-    ...
+    my ($self, $data) = @_;
+    my $datalen = length( $data );
+    my $pkglen = $datalen + 20;
+
+    $self->{socket}->send( 
+        pack( "(LLL)", $pkglen, 0, 0 ) . msg_id() . pack( "L<", $datalen ) . $data, 0
+    );
+
 }
 
 ## send encrypted message
