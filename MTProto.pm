@@ -1,7 +1,11 @@
 package MTProto;
 
-use fields qw( socket session_id salt seq auth_key auth_key_id auth_key_aux );
+use strict;
+use warnings;
 
+use fields qw( socket session_id salt seq auth_key auth_key_id auth_key_aux _tcp_first );
+
+use IO::Socket;
 use Time::HiRes qw( time );
 use Crypt::OpenSSL::Bignum;
 use Crypt::OpenSSL::RSA;
@@ -77,12 +81,31 @@ sub aes_ige_dec
     return $plain;
 }
 
+sub gen_msg_key
+{
+    my ($self, $plain, $x) = @_;
+    my $msg_key = substr( sha256(substr($self->{auth_key}, 88+$x, 32) . $plain), 8, 16 );
+    return $msg_key;
+}
+
+sub gen_aes_key
+{
+    my ($self, $msg_key, $x) = @_;
+    my $sha_a = sha256( $msg_key . substr($self->{auth_key}, $x, 36) );
+    my $sha_b = sha256( substr($self->{auth_key}, 40+$x, 36) . $msg_key );
+    my $aes_key = substr($sha_a, 0, 8) . substr($sha_b, 8, 16) . substr($sha_a, 24, 8);
+    my $aes_iv = substr($sha_b, 0, 8) . substr($sha_a, 8, 16) . substr($sha_b, 24, 8);
+    return ($aes_key, $aes_iv);
+}
+
 
 sub new
 {
     my $class = shift;
     my $self = fields::new( ref $class || $class );
     $self->{socket} = shift;
+    $self->{_tcp_first} = 1;
+    $self->{seq} = 0;
     return $self;
 }
 
@@ -92,6 +115,7 @@ sub start_session
     my $self = shift;
     my (@stream, $data, $len, $enc_data, $pad);
 
+    print "starting new session\n";
 #
 # STEP 1: PQ Request
 #
@@ -104,9 +128,12 @@ sub start_session
     
     $self->send_plain( pack( "(a4)*", $req_pq->pack ) );
     @stream = unpack( "(a4)*", $self->recv_plain );
+    die unless @stream;
 
     my $res_pq = TL::Object::unpack_obj( \@stream );
     die unless $res_pq->isa("MTProto::ResPQ");
+
+    print "got ResPQ\n";
 
     my $pq = unpack "Q>", $res_pq->{pq};
     my @pq = factor($pq);
@@ -148,9 +175,12 @@ sub start_session
 
     $self->send_plain( pack( "(a4)*", $req_dh->pack ) );
     @stream = unpack( "(a4)*", $self->recv_plain );
+    die unless @stream;
 
     my $dh_params = TL::Object::unpack_obj( \@stream );
     die unless $dh_params->isa('MTProto::ServerDHParamsOk');
+
+    print "got ServerDHParams\n";
 
     my $tmp_key = sha1( $new_nonce->to_bin() . $res_pq->{server_nonce}->to_bin ).
             substr( sha1( $res_pq->{server_nonce}->to_bin() . $new_nonce->to_bin ), 0, 12 );
@@ -165,8 +195,12 @@ sub start_session
 
     # ans with padding -> can't check digest
     @stream = unpack( "(a4)*", $ans );
+    die unless @stream;
+
     my $dh_inner = TL::Object::unpack_obj( \@stream );
     die unless $dh_inner->isa('MTProto::ServerDHInnerData');
+    
+    print "got ServerDHInnerData\n";
 
     die "bad nonce" unless $dh_inner->{nonce}->equals( $nonce );
     die "bad server_nonce" unless $dh_inner->{server_nonce}->equals( $res_pq->{server_nonce} );
@@ -196,7 +230,7 @@ sub start_session
     $len = (length($data) + 15 ) & 0xfffffff0;
     $pad = Crypt::OpenSSL::Random::random_pseudo_bytes($len - length($data));
     $data = $data . $pad;
-    $enc_data = aes_ige_enc( $plain, $tmp_key, $tmp_iv );
+    $enc_data = aes_ige_enc( $data, $tmp_key, $tmp_iv );
 
     my $dh_par = MTProto::SetClientDHParams->new;
     $dh_par->{nonce} = $nonce;
@@ -207,9 +241,12 @@ sub start_session
 
     $self->send_plain( pack( "(a4)*", $dh_par->pack ) );
     @stream = unpack( "(a4)*", $self->recv_plain );
+    die unless @stream;
 
     my $result = TL::Object::unpack_obj( \@stream );
     die unless $result->isa('MTProto::DhGenOk');
+
+    print "DH OK\n";
 
     # check new_nonce_hash
     my $auth_key_aux_hash = substr(sha1($auth_key), 0, 8);
@@ -218,6 +255,8 @@ sub start_session
     my $nnh = $new_nonce->to_bin . pack("C", 1) . $auth_key_aux_hash;
     $nnh = substr(sha1($nnh), -16);
     die "bad new_nonce_hash1" unless $result->{new_nonce_hash1}->to_bin eq $nnh;
+
+    print "session started\n";
 
     $self->{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($res_pq->{server_nonce}->to_bin, 0, 8);
     $self->{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
@@ -245,6 +284,11 @@ sub send_plain
     my $datalen = length( $data );
     my $pkglen = $datalen + 20;
 
+    # init tcp intermediate (no seq_no & crc)
+    if ($self->{_tcp_first}) {
+        $self->{socket}->send( pack( "L", 0xeeeeeeee ), 0 );
+        $self->{_tcp_first} = 0;
+    }
     $self->{socket}->send( 
         pack( "(LLL)", $pkglen, 0, 0 ) . msg_id() . pack( "L<", $datalen ) . $data, 0
     );
@@ -254,7 +298,61 @@ sub send_plain
 ## send encrypted message
 sub send
 {
-    ...
+    my ($self, $payload) = @_;
+    my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
+        -(12+length($payload)) % 16 + 12 );
+
+    my $plain = $self->{salt} . $self->{session_id} . $self->msg_id . 
+        pack( "(LL)<", $self->{seq}, length($payload) ) .
+        $payload . $pad;
+
+    my $msg_key = $self->gen_msg_key( $plain, 0 );
+    my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
+    my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
+
+    my $packet = $self->{auth_key_id} . $msg_key . $enc_data;
+    $self->{socket}->send(pack("L<", length($packet)).$packet, 0);
+}
+
+sub recv_plain
+{
+    my $self = shift;
+    my ($len, $data);
+
+    $self->{socket}->recv( $data, 4, MSG_WAITALL );
+    $len = unpack "L<", $data;
+
+    $self->{socket}->recv( $data, $len, MSG_WAITALL );
+
+    if ($len < 16) {
+        print "error: ", unpack( "l<", $data ), "\n";
+        return undef;
+    } else {
+        #$$authkey = substr($data, 0, 8);
+        #$$msgid = substr($data, 8, 8);
+        $len = unpack "L<", substr($data, 16, 4);
+        return substr($data, 20, $len);
+    }   
+}
+
+sub recv
+{
+    my $self = shift;
+    my ($len, $data);
+    $self->{socket}->recv( $data, 4, MSG_WAITALL );
+    $len = unpack "L<", $data;
+
+    $self->{socket}->recv( $data, $len, MSG_WAITALL );
+
+    my $authkey = substr($data, 0, 8);
+    my $msg_key = substr($data, 8, 16);
+    my $enc_data = substr($data, 24);
+
+    my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
+    my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
+    my $in_len = unpack "L<", substr($plain, 28, 4);
+    my $in_data = substr($plain, 32, $in_len);
+    return $in_data;
 }
 
 1;
