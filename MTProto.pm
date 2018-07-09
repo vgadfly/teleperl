@@ -5,6 +5,7 @@ use warnings;
 
 use fields qw( socket session_id salt seq auth_key auth_key_id auth_key_aux _tcp_first );
 
+use Storable qw( store retrieve dclone );
 use IO::Socket;
 use Time::HiRes qw( time );
 use Crypt::OpenSSL::Bignum;
@@ -268,13 +269,20 @@ sub start_session
 ## load auth key and shit from file
 sub load_session
 {
-    ...
+    my ($self, $file) = @_;
+    my @saved = qw( session_id salt seq auth_key auth_key_id auth_key_aux );
+    my $stor = retrieve($file);
+    @$self{@saved}= @$stor{@saved};
 }
 
 ## save auth key and shit to file
 sub save_session
 {
-    ...
+    my ($self, $file) = @_;
+    my @saved = qw( session_id salt seq auth_key auth_key_id auth_key_aux );
+    my %stor;
+    @stor{@saved}= @$self{@saved};
+    store(\%stor, $file);
 }
 
 ## send unencrypted message
@@ -299,6 +307,13 @@ sub send_plain
 sub send
 {
     my ($self, $payload) = @_;
+    
+    # init tcp intermediate (no seq_no & crc)
+    if ($self->{_tcp_first}) {
+        $self->{socket}->send( pack( "L", 0xeeeeeeee ), 0 );
+        $self->{_tcp_first} = 0;
+    }
+
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
         -(12+length($payload)) % 16 + 12 );
 
@@ -311,6 +326,8 @@ sub send
     my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
 
     my $packet = $self->{auth_key_id} . $msg_key . $enc_data;
+
+    print "sending ".length($packet). " bytes encrypted\n";
     $self->{socket}->send(pack("L<", length($packet)).$packet, 0);
 }
 
@@ -343,6 +360,13 @@ sub recv
     $len = unpack "L<", $data;
 
     $self->{socket}->recv( $data, $len, MSG_WAITALL );
+    
+    if ($len < 24) {
+        print "error: ", unpack( "l<", $data ), "\n";
+        return undef;
+    }
+    
+    print "recvd $len bytes encrypted\n";
 
     my $authkey = substr($data, 0, 8);
     my $msg_key = substr($data, 8, 16);
@@ -350,8 +374,28 @@ sub recv
 
     my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
     my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
+    
+    my $in_seq = unpack "L<", substr($plain, 24, 4);
     my $in_len = unpack "L<", substr($plain, 28, 4);
     my $in_data = substr($plain, 32, $in_len);
+
+    # unpack msg containers
+    my $objid = unpack( "L<", substr($in_data, 0, 4) );
+    if ($objid == 0x73f1f8dc) {
+        print "msg_container:\n";
+        my $msg_count = unpack( "L<", substr($in_data, 4, 4) );
+        my $pos = 8;
+        while ( $msg_count && $pos < $in_len ) {
+            my $sub_len = unpack( "L<", substr($in_data, $pos+12, 4) );
+            my $sub_msg = substr($in_data, $pos+16, $sub_len);
+
+            print "  ", unpack( "H*", $sub_msg ), "\n";
+            $pos += 16 + $sub_len;
+            $msg_count--;
+        }
+    }
+    
+    print "in_seq: $in_seq\n";
     return $in_data;
 }
 
