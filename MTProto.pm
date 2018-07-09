@@ -25,6 +25,7 @@ use MTProto::PQInnerData;
 use MTProto::ReqDHParams;
 use MTProto::SetClientDHParams;
 use MTProto::ClientDHInnerData;
+use MTProto::MsgsAck;
 
 use Keys;
 
@@ -355,7 +356,8 @@ sub recv_plain
 sub recv
 {
     my $self = shift;
-    my ($len, $data);
+    my ($len, $data, @ret);
+
     $self->{socket}->recv( $data, 4, MSG_WAITALL );
     $len = unpack "L<", $data;
 
@@ -375,6 +377,7 @@ sub recv
     my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
     my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
     
+    my $msg_id = unpack "Q<", substr($plain, 16, 8);
     my $in_seq = unpack "L<", substr($plain, 24, 4);
     my $in_len = unpack "L<", substr($plain, 28, 4);
     my $in_data = substr($plain, 32, $in_len);
@@ -386,17 +389,32 @@ sub recv
         my $msg_count = unpack( "L<", substr($in_data, 4, 4) );
         my $pos = 8;
         while ( $msg_count && $pos < $in_len ) {
+            my $sub_id = unpack "Q<", substr($in_data, $pos, 8);
             my $sub_len = unpack( "L<", substr($in_data, $pos+12, 4) );
             my $sub_msg = substr($in_data, $pos+16, $sub_len);
 
+            push @ret, { msg_id => $sub_id, data => $sub_msg };
             print "  ", unpack( "H*", $sub_msg ), "\n";
             $pos += 16 + $sub_len;
             $msg_count--;
         }
     }
+    else {
+        push @ret, { msg_id => $msg_id, data => $in_data };
+    }
     
     print "in_seq: $in_seq\n";
-    return $in_data;
+    return @ret;
+}
+
+sub ack
+{
+    my ($self, @msg_ids) = @_;
+
+    my $ack = MTProto::MsgsAck->new;
+    $ack->{msg_ids} = \@msg_ids;
+
+    $self->send( pack( "(a4)*", $ack->pack ) );
 }
 
 1;
