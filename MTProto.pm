@@ -3,7 +3,7 @@ package MTProto;
 use strict;
 use warnings;
 
-use fields qw( socket session_id salt seq auth_key auth_key_id auth_key_aux _tcp_first );
+use fields qw( socket session_id salt seq auth_key auth_key_id auth_key_aux pending _tcp_first );
 
 use Storable qw( store retrieve dclone );
 use IO::Socket;
@@ -34,7 +34,7 @@ sub msg_id
     my $time = time;
     my $hi = int( $time );
     my $lo = int ( ( $time - $hi ) * 2**32 );
-    return pack( "(LL)<", $lo, $hi );
+    return unpack( "Q<", pack( "(LL)<", $lo, $hi ) );
 }
 
 sub aes_ige_enc
@@ -299,7 +299,7 @@ sub send_plain
         $self->{_tcp_first} = 0;
     }
     $self->{socket}->send( 
-        pack( "(LLL)", $pkglen, 0, 0 ) . msg_id() . pack( "L<", $datalen ) . $data, 0
+        pack( "(LQQL)<", $pkglen, 0, msg_id(), $datalen ) . $data, 0
     );
 
 }
@@ -318,10 +318,36 @@ sub send
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
         -(12+length($payload)) % 16 + 12 );
 
-    my $plain = $self->{salt} . $self->{session_id} . $self->msg_id . 
-        pack( "(LL)<", $self->{seq}, length($payload) ) .
+    my $msg_id = $self->msg_id;
+    my $plain = $self->{salt} . $self->{session_id} . 
+        pack( "(QLL)<", $msg_id, $self->{seq}, length($payload) ) .
         $payload . $pad;
 
+    # XXX need msg struct (and has MTProto::Message)
+    $self->{pending}{$msg_id} = $plain;
+    print "pending $msg_id\n";
+
+    my $msg_key = $self->gen_msg_key( $plain, 0 );
+    my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
+    my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
+
+    my $packet = $self->{auth_key_id} . $msg_key . $enc_data;
+
+    print "sending ".length($packet). " bytes encrypted\n";
+    $self->{socket}->send(pack("L<", length($packet)).$packet, 0);
+}
+
+# XXX: message should own it's msg_id and seq
+sub resend
+{
+    my ($self, $msg_id) = @_;
+    
+    my $plain = $self->{pending}{$msg_id};
+    return unless defined $plain;
+
+    # renew salt
+    substr($plain, 0, 8, $self->{salt});
+    
     my $msg_key = $self->gen_msg_key( $plain, 0 );
     my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
     my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
