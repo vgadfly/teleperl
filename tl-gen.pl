@@ -144,7 +144,7 @@ for my $type (@types) {
         if (exists $arg->{type}{vector}) {
             print $f "  push \@stream, pack('L<', 0x1cb5c415);\n";
             print $f "  push \@stream, pack('L<', scalar \@{\$self->{$arg->{name}}});\n";
-            if (exists $builtin{$arg->{type}{name}}) {
+            if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@stream, TL::Object::pack_$arg->{type}{name}( \$_ ) for \@{\$self->{$arg->{name}}};\n"
             }
             else {
@@ -152,7 +152,7 @@ for my $type (@types) {
             }
         }
         else {
-            if (exists $builtin{$arg->{type}{name}}) {
+            if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@stream, TL::Object::pack_$arg->{type}{name}( \$self->{$arg->{name}} );\n"
             }
             else {
@@ -174,7 +174,7 @@ for my $type (@types) {
             print $f "  shift \@\$stream; #0x1cb5c415\n";
             print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
             print $f "  \@_v = ();\n";
-            if (exists $builtin{$arg->{type}{name}}) {
+            if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@_v, TL::Object::unpack_$arg->{type}{name}( \$stream ) while (\$_--);\n";
             }
             else {
@@ -183,7 +183,7 @@ for my $type (@types) {
             print $f "  \$self->{$arg->{name}} = [ \@_v ];\n";
         }
         else {
-            if (exists $builtin{$arg->{type}{name}}) {
+            if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  \$self->{$arg->{name}} = TL::Object::unpack_$arg->{type}{name}( \$stream );\n";
             }
             else {

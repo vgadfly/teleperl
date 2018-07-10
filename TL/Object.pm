@@ -121,6 +121,7 @@ sub unpack_int256
 sub unpack_obj
 {
     use MTProto::ObjTable;
+    use Telegram::ObjTable;
     my $stream = shift;
     my $hash = unpack( "L<", shift @$stream );
     if (exists $MTProto::ObjTable::tl_type{$hash}) {
@@ -129,6 +130,25 @@ sub unpack_obj
         require $pm.".pm";
         return $MTProto::ObjTable::tl_type{$hash}->unpack($stream);
     }
+    if (exists $Telegram::ObjTable::tl_type{$hash}) {
+        my $pm = $Telegram::ObjTable::tl_type{$hash};
+        $pm =~ s/::/\//g;
+        require $pm.".pm";
+        return $Telegram::ObjTable::tl_type{$hash}->unpack($stream);
+    }
     return undef;
+}
+
+sub pack_Bool
+{
+    return ( $_[0] ? 0x997275b5 : 0xbc799737 );
+}
+
+sub unpack_Bool
+{
+    my $stream = shift;
+    my $bool = unpack( "L<", shift @$stream );
+
+    return ($bool == 0x997275b5);
 }
 1;

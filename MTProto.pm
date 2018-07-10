@@ -307,7 +307,7 @@ sub send_plain
 ## send encrypted message
 sub send
 {
-    my ($self, $payload) = @_;
+    my ($self, $payload, $content) = @_;
     
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
@@ -320,7 +320,7 @@ sub send
 
     my $msg_id = $self->msg_id;
     my $plain = $self->{salt} . $self->{session_id} . 
-        pack( "(QLL)<", $msg_id, $self->{seq}, length($payload) ) .
+        pack( "(QLL)<", $msg_id, ($content ? $self->{seq} + 1 : $self->{seq}), length($payload) ) .
         $payload . $pad;
 
     # XXX need msg struct (and has MTProto::Message)
@@ -420,7 +420,7 @@ sub recv
             my $sub_msg = substr($in_data, $pos+16, $sub_len);
 
             push @ret, { msg_id => $sub_id, data => $sub_msg };
-            print "  ", unpack( "H*", $sub_msg ), "\n";
+            #print "  ", unpack( "H*", $sub_msg ), "\n";
             $pos += 16 + $sub_len;
             $msg_count--;
         }
