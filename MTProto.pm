@@ -1,11 +1,44 @@
+use warnings;
+use strict;
+
+package MTProto::Message;
+
+use fields qw( msg_id seq data );
+
+sub msg_id
+{
+    my $time = time;
+    my $hi = int( $time );
+    my $lo = int ( ( $time - $hi ) * 2**32 );
+    return unpack( "Q<", pack( "(LL)<", $lo, $hi ) );
+}
+
+sub new
+{
+    my ($class, $seq, $data) = @_;
+    my $self = fields::new( ref $class || $class );
+    $self->{msg_id} = msg_id();
+    $self->{seq} = $seq;
+    $self->{data} = $data;
+}
+
+sub pack
+{
+    ...
+}
+
+sub unpack
+{
+    ...
+}
+
+
 package MTProto;
 
-use strict;
-use warnings;
+use base 'Danga::Socket';
+use fields qw( socket session _pending _tcp_first );
 
-use fields qw( socket session_id salt seq auth_key auth_key_id auth_key_aux pending _tcp_first );
-
-use Storable qw( store retrieve dclone );
+use Carp;
 use IO::Socket;
 use Time::HiRes qw( time );
 use Crypt::OpenSSL::Bignum;
@@ -28,14 +61,6 @@ use MTProto::ClientDHInnerData;
 use MTProto::MsgsAck;
 
 use Keys;
-
-sub msg_id
-{
-    my $time = time;
-    my $hi = int( $time );
-    my $lo = int ( ( $time - $hi ) * 2**32 );
-    return unpack( "Q<", pack( "(LL)<", $lo, $hi ) );
-}
 
 sub aes_ige_enc
 {
@@ -103,11 +128,11 @@ sub gen_aes_key
 
 sub new
 {
-    my $class = shift;
+    my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
-    $self->{socket} = shift;
+    $self->{socket} = $arg{socket};
     $self->{_tcp_first} = 1;
-    $self->{seq} = 0;
+    $self->{session} = $arg{session};
     return $self;
 }
 
@@ -260,30 +285,12 @@ sub start_session
 
     print "session started\n";
 
-    $self->{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($res_pq->{server_nonce}->to_bin, 0, 8);
-    $self->{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
-    $self->{auth_key} = $auth_key;
-    $self->{auth_key_id} = $auth_key_hash;
-    $self->{auth_key_aux} = $auth_key_aux_hash;
-}
-
-## load auth key and shit from file
-sub load_session
-{
-    my ($self, $file) = @_;
-    my @saved = qw( session_id salt seq auth_key auth_key_id auth_key_aux );
-    my $stor = retrieve($file);
-    @$self{@saved}= @$stor{@saved};
-}
-
-## save auth key and shit to file
-sub save_session
-{
-    my ($self, $file) = @_;
-    my @saved = qw( session_id salt seq auth_key auth_key_id auth_key_aux );
-    my %stor;
-    @stor{@saved}= @$self{@saved};
-    store(\%stor, $file);
+    $self->{session}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($res_pq->{server_nonce}->to_bin, 0, 8);
+    $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+    $self->{session}{auth_key} = $auth_key;
+    $self->{session}{auth_key_id} = $auth_key_hash;
+    $self->{session}{auth_key_aux} = $auth_key_aux_hash;
+    $self->{session}{seq} = 0;
 }
 
 ## send unencrypted message
@@ -307,25 +314,21 @@ sub send_plain
 ## send encrypted message
 sub send
 {
-    my ($self, $payload, $content) = @_;
+    my ($self, $msg, $service) = @_;
     
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
         $self->{socket}->send( pack( "L", 0xeeeeeeee ), 0 );
         $self->{_tcp_first} = 0;
     }
-
+    croak() unless $msg->isa('MTProto::Message');
+    $self->{_pending}{$msg->{msg_id}} = $msg;
+    
+    my $payload = $msg->pack;
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
-        -(12+length($payload)) % 16 + 12 );
+        -(12+length($msg->{data})) % 16 + 12 );
 
-    my $msg_id = $self->msg_id;
-    my $plain = $self->{salt} . $self->{session_id} . 
-        pack( "(QLL)<", $msg_id, ($content ? $self->{seq} + 1 : $self->{seq}), length($payload) ) .
-        $payload . $pad;
-
-    # XXX need msg struct (and has MTProto::Message)
-    $self->{pending}{$msg_id} = $plain;
-    print "pending $msg_id\n";
+    my $plain = $self->{session}{salt} . $self->{session}{session_id} . $payload . $pad;
 
     my $msg_key = $self->gen_msg_key( $plain, 0 );
     my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
@@ -333,28 +336,7 @@ sub send
 
     my $packet = $self->{auth_key_id} . $msg_key . $enc_data;
 
-    print "sending ".length($packet). " bytes encrypted\n";
-    $self->{socket}->send(pack("L<", length($packet)).$packet, 0);
-}
-
-# XXX: message should own it's msg_id and seq
-sub resend
-{
-    my ($self, $msg_id) = @_;
-    
-    my $plain = $self->{pending}{$msg_id};
-    return unless defined $plain;
-
-    # renew salt
-    substr($plain, 0, 8, $self->{salt});
-    
-    my $msg_key = $self->gen_msg_key( $plain, 0 );
-    my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
-    my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
-
-    my $packet = $self->{auth_key_id} . $msg_key . $enc_data;
-
-    print "sending ".length($packet). " bytes encrypted\n";
+    print "sending $msg->{seq}:$msg->{msg_id}, ".length($packet). " bytes encrypted\n";
     $self->{socket}->send(pack("L<", length($packet)).$packet, 0);
 }
 
@@ -403,33 +385,27 @@ sub recv
     my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
     my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
     
-    my $msg_id = unpack "Q<", substr($plain, 16, 8);
-    my $in_seq = unpack "L<", substr($plain, 24, 4);
-    my $in_len = unpack "L<", substr($plain, 28, 4);
-    my $in_data = substr($plain, 32, $in_len);
+    my $msg = MTProto::Message::unpack($plain);
 
     # unpack msg containers
-    my $objid = unpack( "L<", substr($in_data, 0, 4) );
+    my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
     if ($objid == 0x73f1f8dc) {
-        print "msg_container:\n";
-        my $msg_count = unpack( "L<", substr($in_data, 4, 4) );
+        $data = $msg->{data};
+        my $msg_count = unpack( "L<", substr($data, 4, 4) );
         my $pos = 8;
-        while ( $msg_count && $pos < $in_len ) {
-            my $sub_id = unpack "Q<", substr($in_data, $pos, 8);
-            my $sub_len = unpack( "L<", substr($in_data, $pos+12, 4) );
-            my $sub_msg = substr($in_data, $pos+16, $sub_len);
-
-            push @ret, { msg_id => $sub_id, data => $sub_msg };
+        while ( $msg_count && $pos < length($data) ) {
+            my $sub_len = unpack( "L<", substr($data, $pos+12, 4) );
+            my $sub_msg = MTProto::Message::unpack( substr($data, $pos) );
+            push @ret, $sub_msg;
             #print "  ", unpack( "H*", $sub_msg ), "\n";
             $pos += 16 + $sub_len;
             $msg_count--;
         }
     }
     else {
-        push @ret, { msg_id => $msg_id, data => $in_data };
+        push @ret, $msg;
     }
     
-    print "in_seq: $in_seq\n";
     return @ret;
 }
 
@@ -439,8 +415,13 @@ sub ack
 
     my $ack = MTProto::MsgsAck->new;
     $ack->{msg_ids} = \@msg_ids;
+    my $msg = MTproto::Message->new( $self->{session}{seq}, pack( "(a4)*", $ack->pack ) );
+    $self->send($msg);
+}
 
-    $self->send( pack( "(a4)*", $ack->pack ) );
+sub invoke
+{
+    ...
 }
 
 1;
