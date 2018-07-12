@@ -461,7 +461,7 @@ sub _handle_msg
             delete $self->{_pending}{$_} for @{$m->{object}{msg_ids}};
         }
         if ($m->{object}->isa('MTProto::BadServerSalt')) {
-            $self->{session}{salt} = $m->{object}{new_server_salt};
+            $self->{session}{salt} = pack "Q<", $m->{object}{new_server_salt};
             $self->resend($m->{object}{bad_msg_id});
         }
         if ($m->{object}->isa('MTProto::NewSessionCreated')){
