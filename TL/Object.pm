@@ -5,6 +5,9 @@ use 5.012;
 use warnings;
 use strict;
 
+use Carp qw/croak/;
+use Scalar::Util qw/reftype/;
+
 use Crypt::OpenSSL::Bignum;
 
 =head1 SYNOPSYS
@@ -35,6 +38,8 @@ sub pack_long
 sub unpack_long
 {
     my $stream = shift;
+    croak "bad stream" unless reftype($stream) eq 'ARRAY';
+
     my $lw = shift @$stream;
     my $hw = shift @$stream;
     unpack "Q<", pack ("(a4)*", $lw, $hw);
@@ -124,6 +129,8 @@ sub unpack_obj
     use Telegram::ObjTable;
     my $stream = shift;
     my $hash = unpack( "L<", shift @$stream );
+    croak "unexpected stream end" unless defined $hash;
+
     if (exists $MTProto::ObjTable::tl_type{$hash}) {
         my $pm = $MTProto::ObjTable::tl_type{$hash};
         $pm =~ s/::/\//g;

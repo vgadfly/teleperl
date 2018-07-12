@@ -113,7 +113,7 @@ for my $type (@types) {
     print "Generating $pkg in $path\n";
     make_path(dirname($path)); 
     open my $f, ">$path" or die "$!";
-    print $f "package $pkg;\nuse base TL::Object;\n\n";
+    print $f "package $pkg;\nuse base 'TL::Object';\n\n";
 
     print $f "our \$parent = '".pkgname($prefix, $type->{type}{name})."';\n";
     print $f "our \$hash = 0x$hash;\n\n";

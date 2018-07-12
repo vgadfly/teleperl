@@ -1,9 +1,12 @@
 use warnings;
 use strict;
 
+
 package MTProto::Message;
 
-use fields qw( msg_id seq data );
+use fields qw( msg_id seq data object );
+
+use TL::Object;
 
 sub msg_id
 {
@@ -20,35 +23,53 @@ sub new
     $self->{msg_id} = msg_id();
     $self->{seq} = $seq;
     $self->{data} = $data;
+    return $self;
 }
 
 sub pack
 {
-    ...
+    my $self = shift;
+    return pack( "(QLL)<", $self->{msg_id}, $self->{seq}, length($self->{data}) ).$self->{data};
 }
 
 sub unpack
 {
-    ...
+    my ($class, $stream) = @_;
+    my $self = fields::new( ref $class || $class );
+    my ($msg_id, $seq, $len) = unpack( "(QLL)<", $stream );
+    $self->{data} = substr($stream, 16, $len);
+    $self->{msg_id} = $msg_id;
+    $self->{seq} = $seq;
+
+    print "unpacked msg $seq with $len bytes of data\n";
+    my @stream = unpack( "(a4)*", $self->{data} );
+    eval { $self->{object} = TL::Object::unpack_obj(\@stream); };
+    return $self;
 }
 
 
 package MTProto;
 
-use base 'Danga::Socket';
-use fields qw( socket session _pending _tcp_first );
+use Data::Dumper;
+
+use fields qw( socket session on_message _pending _tcp_first _aeh );
+
+use AnyEvent;
+use AnyEvent::Handle;
+use AnyEvent::Socket;
+use Scalar::Util;
 
 use Carp;
 use IO::Socket;
-use Time::HiRes qw( time );
+use Time::HiRes qw/time/;
 use Crypt::OpenSSL::Bignum;
 use Crypt::OpenSSL::RSA;
 use Crypt::OpenSSL::Random;
 use Crypt::OpenSSL::AES;
 use Digest::SHA qw(sha1 sha256);
 
-use Math::Prime::Util qw(factor);
-use List::Util qw( min max );
+use Math::Prime::Util qw/factor/;
+use List::Util qw/min max/;
 
 use TL::Object;
 
@@ -111,15 +132,15 @@ sub aes_ige_dec
 sub gen_msg_key
 {
     my ($self, $plain, $x) = @_;
-    my $msg_key = substr( sha256(substr($self->{auth_key}, 88+$x, 32) . $plain), 8, 16 );
+    my $msg_key = substr( sha256(substr($self->{session}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
     return $msg_key;
 }
 
 sub gen_aes_key
 {
     my ($self, $msg_key, $x) = @_;
-    my $sha_a = sha256( $msg_key . substr($self->{auth_key}, $x, 36) );
-    my $sha_b = sha256( substr($self->{auth_key}, 40+$x, 36) . $msg_key );
+    my $sha_a = sha256( $msg_key . substr($self->{session}{auth_key}, $x, 36) );
+    my $sha_b = sha256( substr($self->{session}{auth_key}, 40+$x, 36) . $msg_key );
     my $aes_key = substr($sha_a, 0, 8) . substr($sha_b, 8, 16) . substr($sha_a, 24, 8);
     my $aes_iv = substr($sha_b, 0, 8) . substr($sha_a, 8, 16) . substr($sha_b, 24, 8);
     return ($aes_key, $aes_iv);
@@ -133,7 +154,33 @@ sub new
     $self->{socket} = $arg{socket};
     $self->{_tcp_first} = 1;
     $self->{session} = $arg{session};
+
+    $self->start_session unless defined $self->{session}{auth_key};
+
+    $self->{_aeh} = AnyEvent::Handle->new(
+        fh => $self->{socket},
+        on_read => $self->_get_read_cb(),
+    );
     return $self;
+}
+
+sub _on_read
+{
+    ...
+}
+
+sub _get_read_cb
+{
+    my $self = shift;
+    return sub {
+        $self->{_aeh}->unshift_read( chunk => 4, sub {
+                my $len = unpack "L<", $_[1];
+                $_[0]->unshift_read( chunk => $len, sub {
+                        my $msg = $_[1];
+                        $self->_handle_msg($msg);
+                    } )
+            } );
+    }
 }
 
 ## generate auth key and shit
@@ -152,7 +199,7 @@ sub start_session
     );
     my $req_pq = MTProto::ReqPqMulti->new;
     $req_pq->{nonce} = $nonce;
-    
+
     $self->send_plain( pack( "(a4)*", $req_pq->pack ) );
     @stream = unpack( "(a4)*", $self->recv_plain );
     die unless @stream;
@@ -306,7 +353,7 @@ sub send_plain
         $self->{_tcp_first} = 0;
     }
     $self->{socket}->send( 
-        pack( "(LQQL)<", $pkglen, 0, msg_id(), $datalen ) . $data, 0
+        pack( "(LQQL)<", $pkglen, 0, MTProto::Message::msg_id(), $datalen ) . $data, 0
     );
 
 }
@@ -321,7 +368,7 @@ sub send
         $self->{socket}->send( pack( "L", 0xeeeeeeee ), 0 );
         $self->{_tcp_first} = 0;
     }
-    croak() unless $msg->isa('MTProto::Message');
+    croak "not MTProto::Message" unless $msg->isa('MTProto::Message');
     $self->{_pending}{$msg->{msg_id}} = $msg;
     
     my $payload = $msg->pack;
@@ -334,10 +381,10 @@ sub send
     my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
     my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
 
-    my $packet = $self->{auth_key_id} . $msg_key . $enc_data;
+    my $packet = $self->{session}{auth_key_id} . $msg_key . $enc_data;
 
     print "sending $msg->{seq}:$msg->{msg_id}, ".length($packet). " bytes encrypted\n";
-    $self->{socket}->send(pack("L<", length($packet)).$packet, 0);
+    $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
 }
 
 sub recv_plain
@@ -361,6 +408,71 @@ sub recv_plain
     }   
 }
 
+sub _handle_msg
+{
+    my ($self, $data) = @_;
+    my @ret;
+
+    print "recvd ". length($data) ." bytes encrypted\n";
+
+    if (length($data) == 4) {
+        # handle error here
+        die "error ".unpack("l<", $data);
+    }
+
+    my $authkey = substr($data, 0, 8);
+    my $msg_key = substr($data, 8, 16);
+    my $enc_data = substr($data, 24);
+
+    my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
+    my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
+  
+    my $in_salt = substr($plain, 0, 8);
+    my $in_sid = substr($plain, 8, 8);
+    $plain = substr($plain, 16);
+    my $msg = MTProto::Message->unpack($plain);
+
+    # unpack msg containers
+    my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
+    if ($objid == 0x73f1f8dc) {
+        $data = $msg->{data};
+        my $msg_count = unpack( "L<", substr($data, 4, 4) );
+        my $pos = 8;
+        print "msg container of size $msg_count\n";
+        while ( $msg_count && $pos < length($data) ) {
+            my $sub_len = unpack( "L<", substr($data, $pos+12, 4) );
+            my $sub_msg = MTProto::Message->unpack( substr($data, $pos) );
+            push @ret, $sub_msg;
+            #print "  ", unpack( "H*", $sub_msg ), "\n";
+            $pos += 16 + $sub_len;
+            $msg_count--;
+        }
+        warn "msg container ended prematuraly" if $msg_count;
+    }
+    else {
+        push @ret, $msg;
+    }
+
+    for my $m (@ret) {
+        if ($m->{object}->isa('MTProto::Pong')) {
+            delete $self->{_pending}{$m->{object}{msg_id}};
+        }
+        if ($m->{object}->isa('MTProto::MsgsAck')) {
+            delete $self->{_pending}{$_} for @{$m->{object}{msg_ids}};
+        }
+        if ($m->{object}->isa('MTProto::BadServerSalt')) {
+            $self->{session}{salt} = $m->{object}{new_server_salt};
+            $self->resend($m->{object}{bad_msg_id});
+        }
+        if ($m->{object}->isa('MTProto::NewSessionCreated')){
+            $self->ack($m->{msg_id});
+        }
+        if (exists $self->{on_message} and defined $self->{on_message}) {
+            &{$self->{on_message}}($m);
+        }
+    }
+}
+
 sub recv
 {
     my $self = shift;
@@ -369,8 +481,7 @@ sub recv
     $self->{socket}->recv( $data, 4, MSG_WAITALL );
     $len = unpack "L<", $data;
 
-    $self->{socket}->recv( $data, $len, MSG_WAITALL );
-    
+    $self->{socket}->recv( $data, $len, MSG_WAITALL );    
     if ($len < 24) {
         print "error: ", unpack( "l<", $data ), "\n";
         return undef;
@@ -384,8 +495,11 @@ sub recv
 
     my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
     my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
-    
-    my $msg = MTProto::Message::unpack($plain);
+  
+    my $in_salt = substr($plain, 0, 8);
+    my $in_sid = substr($plain, 8, 8);
+    $plain = substr($plain, 16);
+    my $msg = MTProto::Message->unpack($plain);
 
     # unpack msg containers
     my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
@@ -395,7 +509,7 @@ sub recv
         my $pos = 8;
         while ( $msg_count && $pos < length($data) ) {
             my $sub_len = unpack( "L<", substr($data, $pos+12, 4) );
-            my $sub_msg = MTProto::Message::unpack( substr($data, $pos) );
+            my $sub_msg = MTProto::Message->unpack( substr($data, $pos) );
             push @ret, $sub_msg;
             #print "  ", unpack( "H*", $sub_msg ), "\n";
             $pos += 16 + $sub_len;
@@ -405,18 +519,28 @@ sub recv
     else {
         push @ret, $msg;
     }
-    
+
     return @ret;
 }
 
 sub ack
 {
     my ($self, @msg_ids) = @_;
+    print "ack ", join (",", @msg_ids), "\n";
 
     my $ack = MTProto::MsgsAck->new;
     $ack->{msg_ids} = \@msg_ids;
-    my $msg = MTproto::Message->new( $self->{session}{seq}, pack( "(a4)*", $ack->pack ) );
+    my $msg = MTProto::Message->new( $self->{session}{seq}, pack( "(a4)*", $ack->pack ) );
     $self->send($msg);
+}
+
+sub resend
+{
+    my ($self, $id) = @_;
+
+    if (exists $self->{_pending}{$id}){
+        $self->send( $self->{_pending}{$id} );
+    }
 }
 
 sub invoke
