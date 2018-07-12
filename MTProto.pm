@@ -20,7 +20,7 @@ sub new
 {
     my ($class, $seq, $data) = @_;
     my $self = fields::new( ref $class || $class );
-    $self->{msg_id} = msg_id();
+    $self->{msg_id} = msg_id() + ($seq  << 2 ) % 256; # provides uniq ids when sending many msgs in short time
     $self->{seq} = $seq;
     $self->{data} = $data;
     return $self;
@@ -467,6 +467,10 @@ sub _handle_msg
         if ($m->{object}->isa('MTProto::NewSessionCreated')){
             $self->ack($m->{msg_id});
         }
+        if ($m->{object}->isa('MTProto::RpcResult')) {
+            delete $self->{_pending}{$m->{object}{req_msg_id}};
+            #$self->ack($m->{msg_id});
+        }
         if (exists $self->{on_message} and defined $self->{on_message}) {
             &{$self->{on_message}}($m);
         }
@@ -545,7 +549,11 @@ sub resend
 
 sub invoke
 {
-    ...
+    my ($self, $obj) = @_;
+    my $msg = MTProto::Message->new( $self->{session}{seq}+1, pack("(a4)*", $obj->pack) );
+    $self->{session}{seq} += 2;
+    $self->send($msg);
+    return $msg->{msg_id};
 }
 
 1;
