@@ -7,6 +7,7 @@ package MTProto::Message;
 use fields qw( msg_id seq data object );
 
 use TL::Object;
+use Time::HiRes qw/time/;
 
 sub msg_id
 {
@@ -20,7 +21,7 @@ sub new
 {
     my ($class, $seq, $data) = @_;
     my $self = fields::new( ref $class || $class );
-    $self->{msg_id} = msg_id() + ($seq  << 2 ) % 256; # provides uniq ids when sending many msgs in short time
+    $self->{msg_id} = msg_id() + ($seq  << 2 ); # provides uniq ids when sending many msgs in short time
     $self->{seq} = $seq;
     $self->{data} = $data;
     return $self;
@@ -41,7 +42,7 @@ sub unpack
     $self->{msg_id} = $msg_id;
     $self->{seq} = $seq;
 
-    print "unpacked msg $seq with $len bytes of data\n";
+    print "unpacked msg $seq:$msg_id with $len bytes of data\n";
     my @stream = unpack( "(a4)*", $self->{data} );
     eval { $self->{object} = TL::Object::unpack_obj(\@stream); };
     return $self;
@@ -61,7 +62,6 @@ use Scalar::Util;
 
 use Carp;
 use IO::Socket;
-use Time::HiRes qw/time/;
 use Crypt::OpenSSL::Bignum;
 use Crypt::OpenSSL::RSA;
 use Crypt::OpenSSL::Random;
