@@ -77,6 +77,7 @@ use Scalar::Util;
 
 use Carp;
 use IO::Socket;
+use IO::Uncompress::Gunzip qw/gunzip/;
 use Crypt::OpenSSL::Bignum;
 use Crypt::OpenSSL::RSA;
 use Crypt::OpenSSL::Random;
@@ -190,7 +191,7 @@ sub _get_read_cb
                 my $len = unpack "L<", $_[1];
                 $_[0]->unshift_read( chunk => $len, sub {
                         my $msg = $_[1];
-                        $self->_handle_msg($msg);
+                        $self->_handle_encrypted($msg);
                     } )
             } );
     }
@@ -429,51 +430,49 @@ sub _recv_plain
 
 sub _handle_msg
 {
-    my ($self, $data) = @_;
-    my @ret;
-
-    print "recvd ". length($data) ." bytes encrypted\n" if $self->{debug};
-
-    if (length($data) == 4) {
-        # handle error here
-        die "error ".unpack("l<", $data);
-    }
-
-    my $authkey = substr($data, 0, 8);
-    my $msg_key = substr($data, 8, 16);
-    my $enc_data = substr($data, 24);
-
-    my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
-    my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
-  
-    my $in_salt = substr($plain, 0, 8);
-    my $in_sid = substr($plain, 8, 8);
-    $plain = substr($plain, 16);
-    my $msg = MTProto::Message->unpack($plain);
+    my ($self, $msg) = @_;
 
     # unpack msg containers
     my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
     if ($objid == 0x73f1f8dc) {
-        $data = $msg->{data};
+        print "Container\n" if $self->{debug};
+
+        my $data = $msg->{data};
         my $msg_count = unpack( "L<", substr($data, 4, 4) );
         my $pos = 8;
+        
         print "msg container of size $msg_count\n" if $self->{debug};
         while ( $msg_count && $pos < length($data) ) {
             my $sub_len = unpack( "L<", substr($data, $pos+12, 4) );
             my $sub_msg = MTProto::Message->unpack( substr($data, $pos) );
-            push @ret, $sub_msg;
+            $self->_handle_msg( $sub_msg );
             #print "  ", unpack( "H*", $sub_msg ), "\n";
             $pos += 16 + $sub_len;
             $msg_count--;
         }
         warn "msg container ended prematuraly" if $msg_count;
     }
-    else {
-        push @ret, $msg;
+    # gzip
+    elsif ($objid == 0x3072cfa1) {
+        print "gzip\n" if $self->{debug};
+        
+        my @stream = unpack "(a4)*", substr($msg->{data}, 4);
+        my $zdata = TL::Object::unpack_string(\@stream);
+        my $objdata;
+        gunzip( \$zdata => \$objdata ) or die "gunzip failure";
+        
+        @stream = unpack "(a4)*", $objdata;
+        my $ret = TL::Object::unpack_obj(\@stream);
+        
+        #print "inflated: ", unpack ("H*", $objdata), "\n" if $self->{debug};
+        #print ref $ret if defined $ret;
+        $msg->{data} = $objdata;
+        $msg->{object} = $ret;
+        $self->_handle_msg( $msg ) if defined $ret;
     }
-
+    else {
     # service msg handlers
-    for my $m (@ret) {
+        my $m = $msg;
         if ($m->{object}->isa('MTProto::Pong')) {
             delete $self->{_pending}{$m->{object}{msg_id}};
         }
@@ -500,6 +499,33 @@ sub _handle_msg
             &{$self->{on_message}}($m);
         }
     }
+
+}
+sub _handle_encrypted
+{
+    my ($self, $data) = @_;
+    my @ret;
+
+    print "recvd ". length($data) ." bytes encrypted\n" if $self->{debug};
+
+    if (length($data) == 4) {
+        # handle error here
+        die "error ".unpack("l<", $data);
+    }
+
+    my $authkey = substr($data, 0, 8);
+    my $msg_key = substr($data, 8, 16);
+    my $enc_data = substr($data, 24);
+
+    my ($aes_key, $aes_iv) = $self->gen_aes_key($msg_key, 8 );
+    my $plain = aes_ige_dec( $enc_data, $aes_key, $aes_iv );
+  
+    my $in_salt = substr($plain, 0, 8);
+    my $in_sid = substr($plain, 8, 8);
+    $plain = substr($plain, 16);
+    
+    my $msg = MTProto::Message->unpack($plain);
+    $self->_handle_msg($msg);
 }
 
 sub _ack
