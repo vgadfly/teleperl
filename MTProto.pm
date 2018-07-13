@@ -8,6 +8,8 @@ use fields qw( msg_id seq data object );
 
 use TL::Object;
 use Time::HiRes qw/time/;
+use Carp;
+use Scalar::Util qw/blessed/;
 
 sub msg_id
 {
@@ -52,6 +54,12 @@ sub unpack
     print "unpacked msg $seq:$msg_id with $len bytes of data\n";
     my @stream = unpack( "(a4)*", $self->{data} );
     eval { $self->{object} = TL::Object::unpack_obj(\@stream); };
+    warn $@ if $@;
+
+    print unpack "H*", $self->{data} unless (defined $self->{object});
+    print ref $self->{object} if (defined $self->{object});
+    print "\n";
+
     return $self;
 }
 
@@ -476,13 +484,17 @@ sub _handle_msg
             $self->{session}{salt} = pack "Q<", $m->{object}{new_server_salt};
             $self->resend($m->{object}{bad_msg_id});
         }
-        if ($m->{object}->isa('MTProto::NewSessionCreated')){
+        if ($m->{object}->isa('MTProto::BadMsgNotification')) {
+            my $ecode = $m->{object}{error_code};
+            my $bad_msg = $m->{object}{bad_msg_id};
+            warn "error $ecode recvd for $bad_msg";
+        }
+        if ($m->{object}->isa('MTProto::NewSessionCreated')) {
             $self->_ack($m->{msg_id});
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {
             delete $self->{_pending}{$m->{object}{req_msg_id}};
-            # XXX: temporary hack
-            #$self->ack($m->{msg_id});
+            $self->_ack($m->{msg_id});
         }
         if (exists $self->{on_message} and defined $self->{on_message}) {
             &{$self->{on_message}}($m);
@@ -513,7 +525,7 @@ sub resend
 sub invoke
 {
     my ($self, $obj, $is_service, $noack) = @_;
-    my $seq = $self->{seq};
+    my $seq = $self->{session}{seq};
     $seq += 1 unless $is_service;
     my $msg = MTProto::Message->new( $seq, $obj );
     $self->{session}{seq} += 2 unless $is_service;
