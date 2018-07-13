@@ -56,9 +56,9 @@ sub unpack
     eval { $self->{object} = TL::Object::unpack_obj(\@stream); };
     warn $@ if $@;
 
-    print unpack "H*", $self->{data} unless (defined $self->{object});
-    print ref $self->{object} if (defined $self->{object});
-    print "\n";
+    #print unpack "H*", $self->{data} unless (defined $self->{object});
+    #print ref $self->{object} if (defined $self->{object});
+    #print "\n";
 
     return $self;
 }
