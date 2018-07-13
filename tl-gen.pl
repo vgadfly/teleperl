@@ -125,8 +125,8 @@ for my $type (@types) {
 
     my @params = map { $_->{name} } @{$type->{args}};
 
-    print $f "# used types\n";
-    print $f "use $_;\n" for keys %argtypes;
+    #print $f "# used types\n";
+    #print $f "use $_;\n" for keys %argtypes;
 
     print $f "use fields qw( ". join( " ", @params )." );\n";
     print $f "\n# subs\n";
