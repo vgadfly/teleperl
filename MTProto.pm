@@ -493,6 +493,10 @@ sub _handle_msg
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {
             delete $self->{_pending}{$m->{object}{req_msg_id}};
+        #    $self->_ack($m->{msg_id});
+        }
+        if ($m->{msg_id} & 1) {
+            # content
             $self->_ack($m->{msg_id});
         }
         if (exists $self->{on_message} and defined $self->{on_message}) {
