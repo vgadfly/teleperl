@@ -131,7 +131,9 @@ for my $type (@types) {
     print $f "use fields qw( ". join( " ", @params )." );\n";
     print $f "\n# subs\n";
 
-    print $f "sub new\n{\n  my \$class = shift;\n  return fields::new( ref \$class || \$class );\n}\n\n";
+    print $f "sub new\n{\n  my \$class = shift;\n";
+    print $f "  my \$self = fields::new( ref \$class || \$class );\n";
+    print $f "  \$self->SUPER::new(\@_);\n}\n\n";
 
     print $f "sub pack\n{\n";
     print $f "  my \$self = shift;\n";

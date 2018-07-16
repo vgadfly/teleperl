@@ -16,6 +16,13 @@ use Crypt::OpenSSL::Bignum;
 
 =cut
 
+sub new
+{
+    my ($self, %arg) = @_;
+    @$self{ keys %arg } = @arg{ keys %arg };
+    return $self;
+}
+
 sub pack_int
 {
     pack "L<", $_[0];

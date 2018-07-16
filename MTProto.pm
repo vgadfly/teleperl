@@ -537,8 +537,8 @@ sub _ack
     my ($self, @msg_ids) = @_;
     print "ack ", join (",", @msg_ids), "\n";
 
-    my $ack = MTProto::MsgsAck->new;
-    $ack->{msg_ids} = \@msg_ids;
+    my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
+    #$ack->{msg_ids} = \@msg_ids;
     $self->invoke( $ack, 1, 1 );
 }
 
