@@ -68,7 +68,7 @@ package MTProto;
 
 use Data::Dumper;
 
-use fields qw( debug socket session on_message _pending _tcp_first _aeh );
+use fields qw( debug socket session on_message noack _pending _tcp_first _aeh );
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -171,6 +171,7 @@ sub new
     $self->{_tcp_first} = 1;
     $self->{session} = $arg{session};
     $self->{debug} = $arg{debug};
+    $self->{noack} = $arg{noack};
 
     # generate new auth_key
     $self->start_session unless defined $self->{session}{auth_key};
@@ -432,6 +433,12 @@ sub _handle_msg
 {
     my ($self, $msg) = @_;
 
+    if ($self->{debug}) {
+        print "handle_msg $msg->{seq},$msg->{msg_id}: ";
+        print ref $msg->{object};
+        print "\n";
+    }
+
     # unpack msg containers
     my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
     if ($objid == 0x73f1f8dc) {
@@ -489,16 +496,18 @@ sub _handle_msg
             warn "error $ecode recvd for $bad_msg";
         }
         if ($m->{object}->isa('MTProto::NewSessionCreated')) {
-            $self->_ack($m->{msg_id});
+            # seq is 1, acked below
+            #$self->_ack($m->{msg_id}) if $self->{noack};
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {
             delete $self->{_pending}{$m->{object}{req_msg_id}};
-        #    $self->_ack($m->{msg_id});
         }
-        if ($m->{msg_id} & 1) {
-            # content
+        if (($m->{seq} & 1) and not $self->{noack}) {
+            # ack content-related messages
             $self->_ack($m->{msg_id});
         }
+
+        # pass msg to handler
         if (exists $self->{on_message} and defined $self->{on_message}) {
             &{$self->{on_message}}($m);
         }
@@ -535,6 +544,8 @@ sub _handle_encrypted
 sub _ack
 {
     my ($self, @msg_ids) = @_;
+    my ($package, $filename, $line) = caller;
+    print "MTProto:_ack called from $filename:$line\n";
     print "ack ", join (",", @msg_ids), "\n";
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
@@ -564,5 +575,10 @@ sub invoke
     return $msg->{msg_id};
 }
 
+sub DESTROY
+{
+    my ($package, $filename, $line) = caller;
+    print "MTProto:destructor called from $filename:$line\n";
+}
 1;
 
