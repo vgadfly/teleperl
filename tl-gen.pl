@@ -9,7 +9,7 @@ use File::Path qw( make_path );
 use TL;
 
 my %builtin = map {$_ => undef} 
-qw( string bytes int long int128 int256 double Bool true date Object );
+qw( string bytes int nat long int128 int256 double Bool date Object );
 
 sub _lex 
 {
@@ -89,6 +89,7 @@ for my $type (@{$parser->YYData->{types}}) {
     }
 }
 for my $type (@{$parser->YYData->{funcs}}) {
+    $type->{func} = 1;
     for my $arg (@{$type->{args}}) {
         if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
             $arg->{type}{name} = $arg->{type}{t_args}[0];
@@ -102,17 +103,19 @@ for my $type (@{$parser->YYData->{funcs}}) {
 my @types = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{types}};
 my @funcs = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{funcs}};
 
-#print Dumper(\@types);
+print Dumper(\@types);
 
 push @types, @funcs;
 for my $type (@types) {
     my ($path, $pkg) = pkgname($prefix, $type->{id});
+    my ($basepath, $basepkg) = pkgname($prefix, $type->{type}{name});
     my $hash = $type->{hash}; # crc
     $hash =~ s/^\#//;
+    $path = $basepath unless $type->{func};
     
     print "Generating $pkg in $path\n";
     make_path(dirname($path)); 
-    open my $f, ">$path" or die "$!";
+    open my $f, ">>$path" or die "$!";
     print $f "package $pkg;\nuse base 'TL::Object';\n\n";
 
     print $f "our \$parent = '".pkgname($prefix, $type->{type}{name})."';\n";
@@ -143,6 +146,9 @@ for my $type (@types) {
     print $f "  push \@stream, pack( 'L<', \$hash );\n";
     for my $arg (@{$type->{args}}) {
         print "$pkg: anonymous parameter of type $arg->{type}{name}!\n" unless exists $arg->{name} and defined $arg->{name};
+        if ( $arg->{cond} ) {
+            print $f "  if ( \$self->{$arg->{cond}{name}} & $arg->{cond}{bitmask} ) {\n";
+        }
         if (exists $arg->{type}{vector}) {
             print $f "  push \@stream, pack('L<', 0x1cb5c415);\n";
             print $f "  push \@stream, pack('L<', scalar \@{\$self->{$arg->{name}}});\n";
@@ -161,6 +167,9 @@ for my $type (@types) {
                 print $f "  push \@stream, \$self->{$arg->{name}}->pack();\n"; 
             }
         }
+        if ( $arg->{cond} ) {
+            print $f "  }\n";
+        }
     }
     print $f "  return \@stream;\n";
     print $f "}\n\n";
@@ -172,6 +181,9 @@ for my $type (@types) {
     print $f "  my \$self = fields::new(\$class);\n";
 
     for my $arg (@{$type->{args}}) {
+        if ( $arg->{cond} ) {
+            print $f "  if ( \$self->{$arg->{cond}{name}} & $arg->{cond}{bitmask} ) {\n";
+        }
         if (exists $arg->{type}{vector}) {
             print $f "  shift \@\$stream; #0x1cb5c415\n";
             print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
@@ -191,6 +203,9 @@ for my $type (@types) {
             else {
                 print $f "  \$self->{$arg->{name}} = TL::Object::unpack_obj( \$stream ); # $arg->{type}{name}\n";
             }
+        }
+        if ( $arg->{cond} ) {
+            print $f "  }\n";
         }
     }
     print $f "  return \$self;\n}\n\n";
