@@ -89,7 +89,7 @@ args: /* empty */ { [] }
     ;
 
 arg: LC_ID ':' type_term { { name => $_[1], type => $_[3] } }
-        | LC_ID ':' condition '?' type_term { { name => $_[1], cond => $_[5], type => $_[3] } }
+        | LC_ID ':' condition '?' type_term { { name => $_[1], cond => $_[3], type => $_[5] } }
         | UC_ID ':' type_term { { name => $_[1], type => $_[3] } }
         | type_term { { type => $_[1] } }
         | '[' LC_ID ']' { { type => $_[2], mult => 1 } }
