@@ -25,10 +25,21 @@ sub new
 
 sub pack_int
 {
-    pack "L<", $_[0];
+    pack "l<", $_[0];
 }
 
 sub unpack_int
+{
+    my $stream = shift;
+    unpack "l<", shift @$stream;
+}
+
+sub pack_nat
+{
+    pack "L<", $_[0];
+}
+
+sub unpack_nat
 {
     my $stream = shift;
     unpack "L<", shift @$stream;
@@ -37,7 +48,7 @@ sub unpack_int
 sub pack_long
 {
     local $_;
-    $_ = pack "Q<", $_[0];
+    $_ = pack "q<", $_[0];
 
     unpack "(a4)*";
 }
@@ -49,7 +60,7 @@ sub unpack_long
 
     my $lw = shift @$stream;
     my $hw = shift @$stream;
-    unpack "Q<", pack ("(a4)*", $lw, $hw);
+    unpack "q<", pack ("(a4)*", $lw, $hw);
 }
 
 sub pack_string
