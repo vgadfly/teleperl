@@ -151,15 +151,13 @@ sub unpack_obj
 
     if (exists $MTProto::ObjTable::tl_type{$hash}) {
         my $pm = $MTProto::ObjTable::tl_type{$hash};
-        $pm =~ s/::/\//g;
-        require $pm.".pm";
-        return $MTProto::ObjTable::tl_type{$hash}->unpack($stream);
+        require $pm->{file};
+        return $pm->{class}->unpack($stream);
     }
     if (exists $Telegram::ObjTable::tl_type{$hash}) {
         my $pm = $Telegram::ObjTable::tl_type{$hash};
-        $pm =~ s/::/\//g;
-        require $pm.".pm";
-        return $Telegram::ObjTable::tl_type{$hash}->unpack($stream);
+        require $pm->{file};
+        return $pm->{class}->unpack($stream);
     }
     return undef;
 }

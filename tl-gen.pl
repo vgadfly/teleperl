@@ -218,10 +218,12 @@ open my $f, ">$prefix/ObjTable.pm" or die "$!";
 
 print $f "package ".$prefix."::ObjTable;\nour %tl_type = (\n";
 for my $type (@types) {
-    my $pkg = pkgname($prefix, $type->{id});
+    my ($path, $pkg) = pkgname($prefix, $type->{id});
+    my ($basepath, $basepkg) = pkgname($prefix, $type->{type}{name});
     my $hash = $type->{hash}; # crc
     $hash =~ s/^\#//;
-    print $f "  0x$hash => '$pkg',\n";
+    $path = $basepath unless $type->{func};
+    print $f "  0x$hash => { file => '$path', class => '$pkg' },\n";
 }
 print $f ");\n1;\n";
 close $f;
