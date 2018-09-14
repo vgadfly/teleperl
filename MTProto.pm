@@ -51,7 +51,7 @@ sub unpack
     $self->{msg_id} = $msg_id;
     $self->{seq} = $seq;
 
-    print "unpacked msg $seq:$msg_id with $len bytes of data\n";
+    #    print "unpacked msg $seq:$msg_id with $len bytes of data\n";
     my @stream = unpack( "(a4)*", $self->{data} );
     eval { $self->{object} = TL::Object::unpack_obj(\@stream); };
     warn $@ if $@;
@@ -575,10 +575,5 @@ sub invoke
     return $msg->{msg_id};
 }
 
-sub DESTROY
-{
-    my ($package, $filename, $line) = caller;
-    print "MTProto:destructor called from $filename:$line\n";
-}
 1;
 
