@@ -9,7 +9,7 @@ use File::Path qw( make_path );
 use TL;
 
 my %builtin = map {$_ => undef} 
-qw( string bytes int nat long int128 int256 double Bool date Object );
+qw( string bytes int nat long int128 int256 double Bool true date Object vector Vector );
 
 sub _lex 
 {
@@ -79,6 +79,9 @@ sub pkgname($$)
 
 # Vector templates
 for my $type (@{$parser->YYData->{types}}) {
+    # skip Vector definition
+    next if $type->{type}{name} =~ '^[Vv]ector$';
+    
     for my $arg (@{$type->{args}}) {
         if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
             $arg->{type}{name} = $arg->{type}{t_args}[0];
@@ -103,7 +106,7 @@ for my $type (@{$parser->YYData->{funcs}}) {
 my @types = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{types}};
 my @funcs = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{funcs}};
 
-print Dumper(\@types);
+#print Dumper(\@types);
 
 push @types, @funcs;
 for my $type (@types) {
@@ -184,9 +187,13 @@ for my $type (@types) {
         if ( $arg->{cond} ) {
             print $f "  if ( \$self->{$arg->{cond}{name}} & $arg->{cond}{bitmask} ) {\n";
         }
+        # XXX: TMP DEBUG
+        #print $f "  print \"unpacking $arg->{name}\\n\";\n";
         if (exists $arg->{type}{vector}) {
             print $f "  shift \@\$stream; #0x1cb5c415\n";
             print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
+            # XXX: TMP DBG
+            #print $f "  print \"  vector of size \$_\\n\";\n";
             print $f "  \@_v = ();\n";
             if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@_v, TL::Object::unpack_$arg->{type}{name}( \$stream ) while (\$_--);\n";

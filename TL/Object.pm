@@ -9,6 +9,9 @@ use Carp qw/croak/;
 use Scalar::Util qw/reftype/;
 
 use Crypt::OpenSSL::Bignum;
+use IO::Uncompress::Gunzip qw/gunzip/;
+
+use Data::Dumper;
 
 =head1 SYNOPSYS
 
@@ -85,12 +88,14 @@ sub unpack_string
     my $stream = shift;
     my $head = shift @$stream;
     my ($len, $str) = unpack "C a3", $head;
+    my $long = 0;
     if ($len == 254) {
+        $long = 1;
         $len = unpack "L<", $str."\0";
         $str = '';
     }
     if ($len > 3) {
-        my $tailnum = $len / 4;
+        my $tailnum = int( ($len + 3*$long) / 4 );
         my @tail = splice( @$stream, 0, $tailnum );
         $str = $str . pack( "(a4)*", @tail );
     }
@@ -146,19 +151,45 @@ sub unpack_obj
     use MTProto::ObjTable;
     use Telegram::ObjTable;
     my $stream = shift;
+    
+    # XXX: debug
+    #warn "stream: ".join(",", map { sprintf("0x%x", $_ ) } map { unpack( "L<", $_ ) } @$stream);
+    
+    my $unpacked = $stream;
     my $hash = unpack( "L<", shift @$stream );
     croak "unexpected stream end" unless defined $hash;
+    
+    # Container msg, don't bother
+    return undef if $hash == 0x73f1f8dc;
+
+    # XXX: some results may be packed
+    if ($hash == 0x3072cfa1) {
+        #warn "zipped object";
+        my $zdata = TL::Object::unpack_string($stream);
+        my $objdata;
+        gunzip( \$zdata => \$objdata ) or die "gunzip failure";
+        
+        my @str = unpack "(a4)*", $objdata;
+        $hash = unpack( "L<", shift @str );
+        $unpacked = \@str;
+    }
 
     if (exists $MTProto::ObjTable::tl_type{$hash}) {
         my $pm = $MTProto::ObjTable::tl_type{$hash};
+        #say "got $pm->{class}";
         require $pm->{file};
-        return $pm->{class}->unpack($stream);
+        return $pm->{class}->unpack($unpacked);
     }
     if (exists $Telegram::ObjTable::tl_type{$hash}) {
         my $pm = $Telegram::ObjTable::tl_type{$hash};
+        #say "got $pm->{class}";
         require $pm->{file};
-        return $pm->{class}->unpack($stream);
+        my $obj = $pm->{class}->unpack($unpacked);
+        #say "unpacked $pm->{class}";
+        #warn "left: ".join(",", map { sprintf("0x%x", $_ ) } map { unpack( "L<", $_ ) } @$stream);
+        return $obj;
     }
+    warn "unknown object type: 0x".sprintf("%x", $hash);
     return undef;
 }
 
@@ -174,4 +205,15 @@ sub unpack_Bool
 
     return ($bool == 0x997275b5);
 }
+
+sub pack_true
+{
+    return ();
+}
+
+sub unpack_true
+{
+    return 1;
+}
+
 1;
