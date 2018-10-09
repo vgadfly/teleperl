@@ -54,7 +54,8 @@ sub unpack
     #    print "unpacked msg $seq:$msg_id with $len bytes of data\n";
     my @stream = unpack( "(a4)*", $self->{data} );
     eval { $self->{object} = TL::Object::unpack_obj(\@stream); };
-    warn $@ if $@;
+    my ($package, $filename, $line) = caller;
+    warn "$@ (called from $filename:$line)" if $@;
 
     #print unpack "H*", $self->{data} unless (defined $self->{object});
     #print ref $self->{object} if (defined $self->{object});
@@ -180,6 +181,11 @@ sub new
     $self->{_aeh} = AnyEvent::Handle->new(
         fh => $self->{socket},
         on_read => $self->_get_read_cb(),
+        on_error => sub {
+            my ($hdl, $fatal, $msg) = @_;
+            warn "error reading from socket: $msg";
+            $hdl->destroy;
+        }
     );
     return $self;
 }
@@ -500,6 +506,7 @@ sub _handle_msg
             #$self->_ack($m->{msg_id}) if $self->{noack};
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {
+            # XXX: result can be packed
             delete $self->{_pending}{$m->{object}{req_msg_id}};
         }
         if (($m->{seq} & 1) and not $self->{noack}) {
