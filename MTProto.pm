@@ -21,9 +21,9 @@ sub msg_id
 
 sub new
 {
-    my ($class, $seq, $data) = @_;
+    my ($class, $seq, $data, $msg_id) = @_;
     my $self = fields::new( ref $class || $class );
-    $self->{msg_id} = msg_id() + ($seq  << 2 ); # provides uniq ids when sending many msgs in short time
+    $self->{msg_id} = $msg_id // msg_id() + ($seq  << 2 ); # provides uniq ids when sending many msgs in short time
     $self->{seq} = $seq;
     if (blessed $data) {
         croak "not a TL object" unless $data->isa('TL::Object');
@@ -237,6 +237,7 @@ sub start_session
 
     print "starting new session\n" if $self->{debug};
 
+    $self->{session}{seq} = 0;
     $self->{_plain} = 1;
 
 #
@@ -436,7 +437,6 @@ sub _phase_three
     #$self->{session}{auth_key} = $auth_key;
     $self->{session}{auth_key_id} = $auth_key_hash;
     $self->{session}{auth_key_aux} = $auth_key_aux_hash;
-    $self->{session}{seq} = 0;
     
     # ecrypted connection established
     $self->{_plain} = 0;
@@ -464,30 +464,36 @@ sub _send_plain
 
 sub queue
 {
-    my ($self, $msg) = @_;
-    push @{$self->{_queue}}, $msg;
+    my ($self, $in_msg) = @_;
+    print "session not ready, queueing\n" if $self->{debug};
+    push @{$self->{_queue}}, $in_msg;
 }
 
 sub unqueue
 {
-    my ($self, $msg) = @_;
+    my $self = shift;
     local $_;
 
-    $self->send($_) while ($_ = shift @{$self->{_queue}});
+    $self->_real_send($_) while ($_ = shift @{$self->{_queue}});
 }
 
 ## send encrypted message
-# XXX: unqueue calls send, send calls queue
 
 sub send
 {
     my ($self, $msg) = @_;
-
+    
     # check if session is ready
     unless ($self->{session}{session_id} and $self->{session}{auth_key_id}) {
         $self->queue($msg);
         return;
     }
+    _real_send(@_);
+}
+
+sub _real_send
+{
+    my ($self, $msg) = @_;
     
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
@@ -679,6 +685,7 @@ sub resend
 sub invoke
 {
     my ($self, $obj, $is_service, $noack) = @_;
+
     my $seq = $self->{session}{seq};
     $seq += 1 unless $is_service;
     my $msg = MTProto::Message->new( $seq, $obj );
