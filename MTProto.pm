@@ -1,6 +1,4 @@
-use warnings;
-use strict;
-
+use Modern::Perl;
 
 package MTProto::Message;
 
@@ -69,7 +67,8 @@ package MTProto;
 
 use Data::Dumper;
 
-use fields qw( debug socket session on_message noack _pending _tcp_first _aeh );
+use fields qw( debug socket session on_message on_error noack 
+    _plain _pending _tcp_first _aeh _handle_plain _pq _queue);
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -170,23 +169,23 @@ sub new
     my $self = fields::new( ref $class || $class );
     $self->{socket} = $arg{socket};
     $self->{_tcp_first} = 1;
+    $self->{_plain} = 0;
     $self->{session} = $arg{session};
     $self->{debug} = $arg{debug};
     $self->{noack} = $arg{noack};
-
-    # generate new auth_key
-    $self->start_session unless defined $self->{session}{auth_key};
+    $self->{on_message} = $arg{on_message};
+    $self->{on_error} = $arg{on_error};
 
     # init AE socket wrap
     $self->{_aeh} = AnyEvent::Handle->new(
         fh => $self->{socket},
         on_read => $self->_get_read_cb(),
-        on_error => sub {
-            my ($hdl, $fatal, $msg) = @_;
-            warn "error reading from socket: $msg";
-            $hdl->destroy;
-        }
+        on_error => $self->_get_error_cb()
     );
+    
+    # generate new auth_key
+    $self->start_session unless defined $self->{session}{auth_key};
+
     return $self;
 }
 
@@ -194,24 +193,54 @@ sub _get_read_cb
 {
     my $self = shift;
     return sub {
+        # all reads start with recving packet length
         $self->{_aeh}->unshift_read( chunk => 4, sub {
                 my $len = unpack "L<", $_[1];
-                $_[0]->unshift_read( chunk => $len, sub {
-                        my $msg = $_[1];
-                        $self->_handle_encrypted($msg);
+                if ($len < 16) {
+                    # it is error
+                    $_[0]->unshift_read( chunk => $len, sub {
+                            my $error = $_[1];
+                            $self->_handle_error($error);
                     } )
-            } );
+                } else {
+                    $_[0]->unshift_read( chunk => $len, sub {
+                            my $msg = $_[1];
+                            if ($self->{_plain}) {
+                                $self->_recv_plain($msg);
+                            }
+                            else {
+                                $self->_handle_encrypted($msg); 
+                            }
+                    } )
+                }
+        } );
+    }
+}
+
+sub _get_error_cb
+{
+    my $self = shift;
+    return sub {
+        say "Socket IO error" if $self->{debug};
+        my ($hdl, $fatal, $msg) = @_;
+        if ($self->{on_error}) {
+            &{$self->{on_error}}( message => $msg );
+        }
+        # ignore $fatal, destroy anyway
+        $hdl->destroy;
     }
 }
 
 ## generate auth key and shit
-## uses blocking send/recv
 sub start_session
 {
     my $self = shift;
-    my (@stream, $data, $len, $enc_data, $pad);
 
     print "starting new session\n" if $self->{debug};
+
+    $self->{_plain} = 1;
+    $self->{session}{seq} = 0;
+
 #
 # STEP 1: PQ Request
 #
@@ -221,9 +250,23 @@ sub start_session
     );
     my $req_pq = MTProto::ReqPqMulti->new;
     $req_pq->{nonce} = $nonce;
+    $self->{_pq}{nonce} = $nonce;
 
+    $self->{_handle_plain} = sub {
+            $self->_phase_one(@_);
+    };
     $self->_send_plain( pack( "(a4)*", $req_pq->pack ) );
-    @stream = unpack( "(a4)*", $self->_recv_plain );
+}
+
+## STEP 1 reply parser
+## handle ResPQ
+
+sub _phase_one 
+{
+    my ($self, $data) = @_;
+    my $nonce = $self->{_pq}{nonce};
+    
+    my @stream = unpack( "(a4)*", $data );
     die unless @stream;
 
     my $res_pq = TL::Object::unpack_obj( \@stream );
@@ -249,9 +292,11 @@ sub start_session
         Crypt::OpenSSL::Random::random_pseudo_bytes(32)
     );
     $pq_inner->{new_nonce} = $new_nonce;
+    $self->{_pq}{new_nonce} = $new_nonce;
+    $self->{_pq}{server_nonce} = $res_pq->{server_nonce};
 
     $data = pack "(a4)*", $pq_inner->pack;
-    $pad = Crypt::OpenSSL::Random::random_pseudo_bytes(255-20-length($data));
+    my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes(255-20-length($data));
     $data = "\0". sha1($data) . $data . $pad;
 
     my @keys = grep {defined} map { Keys::get_key($_) } @{$res_pq->{server_public_key_fingerprints}};
@@ -259,7 +304,7 @@ sub start_session
 
     my $rsa = $keys[0];
     $rsa->use_no_padding;
-    $enc_data = $rsa->encrypt($data);
+    my $enc_data = $rsa->encrypt($data);
 
     my $req_dh = MTProto::ReqDHParams->new;
     $req_dh->{nonce} = $nonce;
@@ -269,8 +314,24 @@ sub start_session
     $req_dh->{public_key_fingerprint} = Keys::key_fingerprint($rsa);
     $req_dh->{encrypted_data} = $enc_data;
 
+    $self->{_handle_plain} = sub {
+            $self->_phase_two(@_)
+    };
     $self->_send_plain( pack( "(a4)*", $req_dh->pack ) );
-    @stream = unpack( "(a4)*", $self->_recv_plain );
+}
+
+## STEP 2 reply parser
+## handle DH Params
+
+sub _phase_two
+{
+    my ($self, $data) = @_;
+
+    my $nonce = $self->{_pq}{nonce};
+    my $new_nonce = $self->{_pq}{new_nonce};
+    my $server_nonce = $self->{_pq}{server_nonce};
+
+    my @stream = unpack( "(a4)*", $data );
     die unless @stream;
 
     my $dh_params = TL::Object::unpack_obj( \@stream );
@@ -278,10 +339,10 @@ sub start_session
 
     print "got ServerDHParams\n" if $self->{debug};
 
-    my $tmp_key = sha1( $new_nonce->to_bin() . $res_pq->{server_nonce}->to_bin ).
-            substr( sha1( $res_pq->{server_nonce}->to_bin() . $new_nonce->to_bin ), 0, 12 );
+    my $tmp_key = sha1( $new_nonce->to_bin() . $server_nonce->to_bin ).
+            substr( sha1( $server_nonce->to_bin() . $new_nonce->to_bin ), 0, 12 );
 
-    my $tmp_iv = substr( sha1( $res_pq->{server_nonce}->to_bin() . $new_nonce->to_bin ), -8 ).
+    my $tmp_iv = substr( sha1( $server_nonce->to_bin() . $new_nonce->to_bin ), -8 ).
             sha1( $new_nonce->to_bin() . $new_nonce->to_bin() ).
             substr( $new_nonce->to_bin(), 0, 4 );
 
@@ -299,7 +360,7 @@ sub start_session
     print "got ServerDHInnerData\n" if $self->{debug};
 
     die "bad nonce" unless $dh_inner->{nonce}->equals( $nonce );
-    die "bad server_nonce" unless $dh_inner->{server_nonce}->equals( $res_pq->{server_nonce} );
+    die "bad server_nonce" unless $dh_inner->{server_nonce}->equals( $server_nonce );
 
 #
 # STEP 3: Complete DH
@@ -317,26 +378,44 @@ sub start_session
 
     my $client_dh_inner = MTProto::ClientDHInnerData->new;
     $client_dh_inner->{nonce} = $nonce;
-    $client_dh_inner->{server_nonce} = $res_pq->{server_nonce};
+    $client_dh_inner->{server_nonce} = $server_nonce;
     $client_dh_inner->{retry_id} = 0;
     $client_dh_inner->{g_b} = $g_b->to_bin;
 
     $data = pack "(a4)*", $client_dh_inner->pack();
     $data = sha1($data) . $data;
-    $len = (length($data) + 15 ) & 0xfffffff0;
-    $pad = Crypt::OpenSSL::Random::random_pseudo_bytes($len - length($data));
+    my $len = (length($data) + 15 ) & 0xfffffff0;
+    my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes($len - length($data));
     $data = $data . $pad;
-    $enc_data = aes_ige_enc( $data, $tmp_key, $tmp_iv );
+    my $enc_data = aes_ige_enc( $data, $tmp_key, $tmp_iv );
 
     my $dh_par = MTProto::SetClientDHParams->new;
     $dh_par->{nonce} = $nonce;
-    $dh_par->{server_nonce} = $res_pq->{server_nonce};
+    $dh_par->{server_nonce} = $server_nonce;
     $dh_par->{encrypted_data} = $enc_data;
 
-    my $auth_key = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
+    # session auth key
+    $self->{session}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
 
+    $self->{_handle_plain} = sub {
+        $self->_phase_three(@_)
+    };
     $self->_send_plain( pack( "(a4)*", $dh_par->pack ) );
-    @stream = unpack( "(a4)*", $self->_recv_plain );
+}
+
+## STEP 3 reply parser
+## check reply to DH params
+
+sub _phase_three
+{
+    my ($self, $data) = @_;
+
+    my $nonce = $self->{_pq}{nonce};
+    my $new_nonce = $self->{_pq}{new_nonce};
+    my $server_nonce = $self->{_pq}{server_nonce};
+    my $auth_key = $self->{session}{auth_key};
+    
+    my @stream = unpack( "(a4)*", $data );
     die unless @stream;
 
     my $result = TL::Object::unpack_obj( \@stream );
@@ -354,16 +433,20 @@ sub start_session
 
     print "session started\n" if $self->{debug};
 
-    $self->{session}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($res_pq->{server_nonce}->to_bin, 0, 8);
+    $self->{session}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
     $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
-    $self->{session}{auth_key} = $auth_key;
+    #$self->{session}{auth_key} = $auth_key;
     $self->{session}{auth_key_id} = $auth_key_hash;
     $self->{session}{auth_key_aux} = $auth_key_aux_hash;
-    $self->{session}{seq} = 0;
+    
+    # ecrypted connection established
+    $self->{_plain} = 0;
+    delete $self->{_pq};
+    # process message queue
+    $self->unqueue;
 }
 
 ## send unencrypted message
-## uses blocking send/recv
 sub _send_plain
 {
     my ($self, $data) = @_;
@@ -372,19 +455,39 @@ sub _send_plain
 
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
-        $self->{socket}->send( pack( "L", 0xeeeeeeee ), 0 );
+        $self->{_aeh}->push_write( pack("L", 0xeeeeeeee) );
         $self->{_tcp_first} = 0;
     }
-    $self->{socket}->send( 
-        pack( "(LQQL)<", $pkglen, 0, MTProto::Message::msg_id(), $datalen ) . $data, 0
+    $self->{_aeh}->push_write( 
+        pack( "(LQQL)<", $pkglen, 0, MTProto::Message::msg_id(), $datalen ) . $data
     );
+}
 
+sub queue
+{
+    my ($self, $msg) = @_;
+    push @{$self->{_queue}}, $msg;
+}
+
+sub unqueue
+{
+    my ($self, $msg) = @_;
+    local $_;
+
+    $self->send($_) while ($_ = shift @{$self->{_queue}});
 }
 
 ## send encrypted message
+
 sub send
 {
     my ($self, $msg) = @_;
+
+    # check if session is ready
+    unless ($self->{session}{session_id} and $self->{session}{auth_key_id}) {
+        $self->queue($msg);
+        return;
+    }
     
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
@@ -412,29 +515,30 @@ sub send
 }
 
 ## recv unencrypted message
-## uses blocking send/recv
 sub _recv_plain
 {
-    my $self = shift;
-    my ($len, $data);
+    my ($self, $data) = @_;
 
-    $self->{socket}->recv( $data, 4, MSG_WAITALL );
-    $len = unpack "L<", $data;
-
-    $self->{socket}->recv( $data, $len, MSG_WAITALL );
-
-    if ($len < 16) {
-        # XXX: error reporting
-        die "error: ", unpack( "l<", $data ), "\n";
-        return undef;
-    } else {
-        #$$authkey = substr($data, 0, 8);
-        #$$msgid = substr($data, 8, 8);
-        $len = unpack "L<", substr($data, 16, 4);
-        return substr($data, 20, $len);
-    }   
+    #$$authkey = substr($data, 0, 8);
+    #$$msgid = substr($data, 8, 8);
+    my $len = unpack "L<", substr($data, 16, 4);
+    &{$self->{_handle_plain}}( substr($data, 20, $len) );
 }
 
+## low level error reporting
+sub _handle_error
+{
+    my ($self, $err) = @_;
+    my $error = unpack( "l<", $err );
+    if ($self->{on_error}) {
+        &{$self->{on_error}}( code => $error );
+    }
+    else {
+        warn "tcp transport error: $error";
+    }
+}
+
+## mtproto message handler
 sub _handle_msg
 {
     my ($self, $msg) = @_;
@@ -521,6 +625,7 @@ sub _handle_msg
     }
 
 }
+
 sub _handle_encrypted
 {
     my ($self, $data) = @_;
@@ -560,6 +665,7 @@ sub _ack
     $self->invoke( $ack, 1, 1 );
 }
 
+## resend message by id, if it's pending (was not ACKed)
 sub resend
 {
     my ($self, $id) = @_;

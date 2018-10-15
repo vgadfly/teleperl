@@ -74,24 +74,22 @@ $mt->{on_message} = sub {
         say STDERR "session created";
     }
     elsif ($msg->{object}->isa('MTProto::RpcResult')) {
+        say Dumper $msg->{object};
         my $res = $msg->{object}{result};
-        if ($res->isa('Telegram::Auth::SentCode') or $res->isa('Telegram::Auth::SentCodeTypeApp')) {
-            say "enter phone code";
+        if ( $res->isa('Telegram::Auth::SentCode') ){
+            say "code sent, ", ref $res->{type};
+            say "enter code";
             chomp( my $pc = <> );
-            my $code = $msg->{object}{result};
 
             my $signin = Telegram::Auth::SignIn->new;
             $signin->{phone_number} = $conf->{user}{phone};
-            $signin->{phone_code_hash} = $code->{phone_code_hash};
+            $signin->{phone_code_hash} = $res->{phone_code_hash};
             $signin->{phone_code} = $pc;
 
             $mt->invoke( $signin );
         }
         elsif ($res->isa('Telegram::Auth::Authorization') ){
             say "auth ok";
-        }
-        else {
-            say Dumper $msg->{object};
         }
     }
     else {
