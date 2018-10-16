@@ -147,6 +147,18 @@ for my $type (@types) {
     print $f "  local \$_;\n";
 
     print $f "  push \@stream, pack( 'L<', \$hash );\n";
+
+    # flags
+    for my $arg (@{$type->{args}}) {
+        print "$pkg: anonymous parameter of type $arg->{type}{name}!\n" unless exists $arg->{name} and defined $arg->{name};
+        if ( $arg->{type}{name} eq 'nat' ) {
+            print $f "  \$self->{$arg->{name}} = 0 unless defined \$self->{$arg->{name}};\n";
+        }
+        if ( $arg->{cond} ) {
+            print $f "  \$self->{$arg->{cond}{name}} |= $arg->{cond}{bitmask} if defined \$self->{$arg->{name}};\n";
+        }
+    }
+
     for my $arg (@{$type->{args}}) {
         print "$pkg: anonymous parameter of type $arg->{type}{name}!\n" unless exists $arg->{name} and defined $arg->{name};
         if ( $arg->{cond} ) {
