@@ -1,6 +1,4 @@
-use warnings;
-use strict;
-
+use Modern::Perl;
 
 package MTProto::Message;
 
@@ -175,6 +173,8 @@ sub new
     $self->{session} = $arg{session};
     $self->{debug} = $arg{debug};
     $self->{noack} = $arg{noack};
+    $self->{on_message} = $arg{on_message};
+    $self->{on_error} = $arg{on_error};
 
     # init AE socket wrap
     $self->{_aeh} = AnyEvent::Handle->new(
@@ -221,6 +221,7 @@ sub _get_error_cb
 {
     my $self = shift;
     return sub {
+        say "Socket IO error" if $self->{debug};
         my ($hdl, $fatal, $msg) = @_;
         if ($self->{on_error}) {
             &{$self->{on_error}}( message => $msg );
@@ -237,8 +238,8 @@ sub start_session
 
     print "starting new session\n" if $self->{debug};
 
-    $self->{session}{seq} = 0;
     $self->{_plain} = 1;
+    $self->{session}{seq} = 0;
 
 #
 # STEP 1: PQ Request
@@ -478,7 +479,6 @@ sub unqueue
 }
 
 ## send encrypted message
-
 sub send
 {
     my ($self, $msg) = @_;
@@ -544,7 +544,6 @@ sub _handle_error
     }
 }
 
-## mtproto message handler
 sub _handle_msg
 {
     my ($self, $msg) = @_;

@@ -16,7 +16,6 @@ use Storable qw( store retrieve freeze thaw );
 use MTProto;
 
 use Data::Dumper;
-use Devel::Gladiator qw/ walk_arena /;
 
 use constant { 
     TEST_DC => '149.154.167.40:443',
@@ -29,9 +28,6 @@ use constant {
     PROXY_USER => '',
     PROXY_PASS => '',
 };
-
-my ($idle, $timer, $signal);
-my %sessions;
 
 my $cond = AnyEvent->condvar;
 
@@ -61,9 +57,8 @@ $mt->{on_message} = sub {
     }
 };
 
-$signal = AnyEvent->signal( signal => 'INT', cb => sub {
+my $signal = AnyEvent->signal( signal => 'INT', cb => sub {
         say STDERR "INT recvd";
-        delete @sessions{ keys %sessions };
         $cond->send;
     } );
 
