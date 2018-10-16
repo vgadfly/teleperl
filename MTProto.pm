@@ -96,6 +96,7 @@ use MTProto::ReqDHParams;
 use MTProto::SetClientDHParams;
 use MTProto::ClientDHInnerData;
 use MTProto::MsgsAck;
+use MTProto::DestroySession;
 
 use Keys;
 
@@ -606,9 +607,16 @@ sub _handle_msg
             $self->resend($m->{object}{bad_msg_id});
         }
         if ($m->{object}->isa('MTProto::BadMsgNotification')) {
+            # sesssion not in sync: destroy and make new
             my $ecode = $m->{object}{error_code};
             my $bad_msg = $m->{object}{bad_msg_id};
             warn "error $ecode recvd for $bad_msg";
+            # no way to destroy current session defined
+            #$self->invoke(MTProto::DestroySession->new( 
+            #        session_id => unpack( "Q<", $self->{session}->{session_id} )
+            #));
+            $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+            $self->{session}{seq} = 0;
         }
         if ($m->{object}->isa('MTProto::NewSessionCreated')) {
             # seq is 1, acked below
