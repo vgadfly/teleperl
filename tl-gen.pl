@@ -106,7 +106,11 @@ for my $type (@{$parser->YYData->{funcs}}) {
 my @types = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{types}};
 my @funcs = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{funcs}};
 
-#print Dumper(\@types);
+my %typeset;
+for my $type (@types) {
+    my ($path, $pkg) = pkgname($prefix, $type->{id});
+    $typeset{$pkg} = undef;
+}
 
 push @types, @funcs;
 for my $type (@types) {
@@ -119,9 +123,18 @@ for my $type (@types) {
     print "Generating $pkg in $path\n";
     make_path(dirname($path)); 
     open my $f, ">>$path" or die "$!";
+
+    unless (exists $typeset{$basepkg}) {
+        print $f "package $basepkg;\n1;\n\n";
+    }
+
     print $f "package $pkg;\nuse base 'TL::Object';\n\n";
 
-    print $f "our \$parent = '".pkgname($prefix, $type->{type}{name})."';\n";
+    unless ($type->{func}) {
+        print $f 'push @ISA, \''.$basepkg."';\n" 
+            unless $basepkg eq $pkg;
+        print $f "our \$parent = '$basepkg';\n";
+    }
     print $f "our \$hash = 0x$hash;\n\n";
 
     my %argtypes = map { scalar pkgname($prefix, $_) => undef } 
