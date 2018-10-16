@@ -16,6 +16,9 @@ use Encode "encode_utf8";
 
 use Data::Dumper;
 
+use Telegram::Messages::GetDialogs;
+use Telegram::InputPeer;
+
 my $in_div = 0;
 my $div_text;
 
@@ -66,7 +69,7 @@ my $tg = Telegram->new(
     proxy => $conf->{proxy},
     session => $session,
     reconnect => 1,
-    debug => 1
+    debug => 0
 );
 
 $tg->{on_update} = sub
@@ -93,6 +96,18 @@ $tg->{on_update} = sub
 
 $tg->start;
 $tg->update;
+
+$tg->invoke(
+    Telegram::Messages::GetDialogs->new(
+        offset_date => 0,
+        offset_id => 0,
+        offset_peer => Telegram::InputPeerEmpty->new,
+        limit => -1
+    ), sub {
+        say "Yay, Dialogs!";
+        say Dumper @_;
+    }
+);
 
 my $signal = AnyEvent->signal( signal => 'INT', cb => sub {
         say STDERR "INT recvd";

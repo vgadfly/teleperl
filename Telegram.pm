@@ -41,7 +41,8 @@ use Telegram::Messages::SendMessage;
 # input
 use Telegram::InputPeer;
 
-use fields qw( _mt _dc _code_cb _app _proxy _timer reconnect session _first _code_hash on_update debug );
+use fields qw( _mt _dc _code_cb _app _proxy _timer _first _code_hash _rpc_cbs 
+    reconnect session on_update debug );
 
 # args: DC, proxy and stuff
 sub new
@@ -107,7 +108,8 @@ sub start
 
 sub invoke
 {
-    my ($self, $query) = @_;
+    my ($self, $query, $res_cb) = @_;
+    my $req_id;
 
     if ($self->{_first}) {
         
@@ -121,13 +123,17 @@ sub invoke
                 query => $query
         );
 
-        $self->{_mt}->invoke( Telegram::InvokeWithLayer->new( layer => 66, query => $conn ) );
+        $req_id = $self->{_mt}->invoke( Telegram::InvokeWithLayer->new( layer => 66, query => $conn ) );
 
         $self->{_first} = 0;
     }
     else {
-        $self->{_mt}->invoke( $query );
+        $req_id = $self->{_mt}->invoke( $query );
     }
+
+    # store handler for this query result
+    $self->{_rpc_cbs}{$req_id} = $res_cb if defined $res_cb;
+    return $req_id;
 }
 
 sub auth
@@ -186,7 +192,17 @@ sub _get_msg_cb
     return sub {
         # most magic happens here
         my $msg = shift;
-        say Dumper $msg->{object};
+        say Dumper $msg->{object} if $self->{debug};
+
+        # RpcResults
+        if ( $msg->{object}->isa('MTProto::RpcResult') ) {
+            my $req_id = $msg->{object}{req_msg_id};
+            say "Got result for $req_id" if $self->{debug};
+            if (defined $self->{_rpc_cbs}{$req_id}) {
+                &{$self->{_rpc_cbs}{$req_id}}( $msg->{object}{result} );
+                delete $self->{_rpc_cbs}{$req_id};
+            }
+        }
 
         # short spec updates
         if ( $msg->{object}->isa('Telegram::UpdateShortMessage') or
@@ -235,7 +251,7 @@ sub message_from_update
     for ( qw( out mentioned media_unread silent id fwd_from via_bot_id 
         reply_to_msg_id date message entities ) ) 
     {
-        $arg{$_} = $upd->{$_};
+        $arg{$_} = $upd->{$_} if exists $upd->{$_};
     }
     # some updates have user_id, some from_id
     $arg{from_id} = $upd->{user_id} if (exists $upd->{user_id});

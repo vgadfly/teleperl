@@ -662,8 +662,7 @@ sub _ack
 {
     my ($self, @msg_ids) = @_;
     my ($package, $filename, $line) = caller;
-    print "MTProto:_ack called from $filename:$line\n";
-    print "ack ", join (",", @msg_ids), "\n";
+    print "ack ", join (",", @msg_ids), "\n" if $self->{debug};
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
     #$ack->{msg_ids} = \@msg_ids;
