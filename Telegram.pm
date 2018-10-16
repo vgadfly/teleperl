@@ -8,6 +8,7 @@ package Telegram;
 
 use Modern::Perl;
 use Data::Dumper;
+use Carp;
 
 use IO::Socket;
 use Net::SOCKS;
@@ -17,7 +18,7 @@ use AnyEvent;
 # This module should use MTProto for communication with telegram DCs
 
 use MTProto;
-
+use MTProto::Ping;
 
 ## Telegram API
 
@@ -42,7 +43,7 @@ use Telegram::Messages::SendMessage;
 use Telegram::InputPeer;
 
 use fields qw( _mt _dc _code_cb _app _proxy _timer _first _code_hash _rpc_cbs 
-    reconnect session on_update debug );
+    reconnect session on_update debug keepalive noupdate );
 
 # args: DC, proxy and stuff
 sub new
@@ -57,6 +58,8 @@ sub new
     $self->{on_update} = $arg{on_update};
     $self->{reconnect} = $arg{reconnect};
     $self->{debug} = $arg{debug};
+    $self->{keepalive} = $arg{keepalive};
+    $self->{noupdate} = $arg{noupdate};
     
     my $session = $arg{session};
     $session->{mtproto} = {} unless exists $session->{mtproto};
@@ -202,6 +205,10 @@ sub _get_msg_cb
                 &{$self->{_rpc_cbs}{$req_id}}( $msg->{object}{result} );
                 delete $self->{_rpc_cbs}{$req_id};
             }
+            if ($msg->{object}{result}->isa('MTProto::RpcError')) {
+                # XXX: on_error
+                &{$self->{on_update}}( $msg->{object}{result} ) if defined $self->{on_update};
+            }
         }
 
         # short spec updates
@@ -278,27 +285,30 @@ sub send_text_message
 {
     my ($self, %arg) = @_;
     my $msg = Telegram::Messages::SendMessage->new;
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
 
     $msg->{message} = $arg{message};
-    $msg->{random_id} = rand(65536);
+    $msg->{random_id} = int(rand(65536));
 
     my $peer;
-    if (exists $self->{session}{users}{$arg{to}}) {
+    if (exists $users->{$arg{to}}) {
         $peer = Telegram::InputPeerUser->new( 
             user_id => $arg{to}, 
-            access_hash => $self->{session}{users}{$arg{to}}{access_hash}
+            access_hash => $users->{$arg{to}}{access_hash}
         );
     }
-    if (exists $self->{session}{chats}{$arg{to}}) {
+    if (exists $chats->{$arg{to}}) {
         $peer = Telegram::InputPeerChannel->new( 
             channel_id => $arg{to}, 
-            access_hash => $self->{session}{users}{$arg{to}}{access_hash}
+            access_hash => $chats->{$arg{to}}{access_hash}
         );
     }
+
     if ($arg{to}->isa('Telegram::PeerChannel')) {
         $peer = Telegram::InputPeerChannel->new( 
             channel_id => $arg{to}->{channel_id}, 
-            access_hash => $self->{session}{chats}{$arg{to}->{channel_id}}{access_hash}
+            access_hash => $chats->{$arg{to}->{channel_id}}{access_hash}
         );
     }
     unless (defined $peer) {
@@ -306,6 +316,8 @@ sub send_text_message
     }
 
     $msg->{peer} = $peer;
+
+    say Dumper $msg if defined $self->{debug};
     $self->invoke( $msg ) if defined $peer;
 }
 
@@ -339,12 +351,77 @@ sub _cache_chats
     }
 }
 
+sub cached_usernames
+{
+    my $self = shift;
+    
+    return map { ($_->{first_name} // '').' '.($_->{last_name} // '') } 
+           grep { $_->{first_name} or $_->{last_name} } 
+           values %{$self->{session}{users}};
+}
+
+sub cached_nicknames
+{
+    my $self = shift;
+
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
+    
+    return map { '@'.$_->{username} } grep { $_->{username} } 
+          ( values %$users, values %$chats );
+}
+
+sub name_to_id
+{
+    my ($self, $nick) = @_;
+
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
+
+    if ($nick =~ /^@/) {
+        $nick =~ s/^@//;
+        for my $uid (keys %$users) {
+            return $uid if defined $users->{$uid}{username} and $users->{$uid}{username} eq $nick;
+        }
+        for my $uid (keys %$chats) {
+            return $uid if defined $chats->{$uid}{username} and $chats->{$uid}{username} eq $nick;
+        }
+    }
+    else {
+        for my $uid (keys %$users) {
+            return $uid if ($users->{$uid}{first_name} // '').' '.($users->{$uid}{last_name} // '') eq $nick;
+        }
+    }
+
+    return undef;
+}
+
+sub peer_name
+{
+    my ($self, $id) = @_;
+    croak unless defined $id;
+
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
+
+    if (exists $users->{$id}) {
+        say "found user ", Dumper($users->{$id}) if $self->{debug};
+        return ($users->{$id}{first_name} // '' ).' '.($users->{$id}{last_name} // '');
+    }
+    if (exists $chats->{$id}) {
+        say "found chat ", Dumper($chats->{$id}) if $self->{debug};
+        return ($chats->{$id}{title} // "chat $id");
+    }
+    return undef;
+}
+
 sub _get_timer_cb
 {
     my $self = shift;
     return sub {
         say "timer tick" if $self->{debug};
-        $self->invoke( Telegram::Updates::GetState->new );
+        $self->invoke( Telegram::Updates::GetState->new ) unless $self->{noupdate};
+        $self->{_mt}->invoke( MTProto::Ping->new( ping_id => rand(65536) ) ) if $self->{keepalive};
     }
 }
 
