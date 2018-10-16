@@ -14,6 +14,8 @@ use Text::ParseWords;
 use Term::ReadLine;
 use Telegram;
 
+use Data::Dumper;
+
 sub init {
     my ($app, $opts) = @_;
 
@@ -30,8 +32,13 @@ sub init {
         proxy => $conf->{proxy},
         session => $session,
         reconnect => 1,
+        keepalive => 1,
+        noupdate => 1,
         debug => 0
     );
+    $tg->{on_update} = sub {$app->report_update(@_)};
+    $tg->start;
+    $tg->update;
 
     $app->cache->set( 'conf' => $conf );
     $app->cache->set( 'tg' => $tg );
@@ -47,6 +54,25 @@ sub read_cmd
     my $term = $app->{_readline};
     unless ( $term ) {
         $term = $app->_init_interactive();
+        $term->event_loop(
+                           sub {
+                               my $data = shift;
+                               $data->[0] = AE::cv();
+                               $data->[0]->recv();
+                           }, sub {
+                               my $fh = shift;
+ 
+                               # The data for AE are: the file event watcher (which
+                               # cannot be garbage collected until we're done) and
+                               # a placeholder for the condvar we're sharing between
+                               # the AE::io callback created here and the wait
+                               # callback above.
+                               my $data = [];
+                               $data->[1] = AE::io($fh, 0, sub { $data->[0]->send() });
+                               $data;
+                           }
+                          );
+
     }
     $app->pre_prompt();
 
@@ -54,7 +80,9 @@ sub read_cmd
     my $cmd = $term->readline( $app->{_readline_prompt}, $app->{_readline_preput} );
     unless ( defined $cmd ) {
         @ARGV = $app->quit_signals();
-        print "quittin..\n";
+        say "quittin..";
+        my $tg = $app->cache->get('tg');
+        store( $tg->{session}, 'session.dat' );
     }
     else {
         @ARGV = Text::ParseWords::shellwords( $cmd );
@@ -64,4 +92,99 @@ sub read_cmd
     return 1;
 }
 
+sub command_map
+{
+    message => 'Teleperl::Command::Message',
+    debug => 'Teleperl::Command::Debug',
+ 
+    # built-in commands:
+    help    => 'CLI::Framework::Command::Help',
+    list    => 'CLI::Framework::Command::List',
+    tree    => 'CLI::Framework::Command::Tree',
+    'dump'  => 'CLI::Framework::Command::Dump',
+    console => 'CLI::Framework::Command::Console',
+    alias   => 'CLI::Framework::Command::Alias',
+}
+
+sub command_alias
+{
+    m => 'message',
+    msg => 'message'
+}
+
+sub report_update
+{
+    my ($self, $upd) = @_;
+    my $tg = $self->cache->get('tg');
+
+    if ($upd->isa('MTProto::RpcError')) {
+        say "\rRpcError $upd->{error_code}: $upd->{error_message}";
+    }
+    if ($upd->isa('Telegram::Message')) {
+        my $name = $tg->peer_name($upd->{from_id});
+        my $to = $upd->{to_id};
+        if ($to) {
+            $to = $to->{channel_id} if $to->isa('Telegram::PeerChannel');
+            $to = $tg->peer_name($to);
+        }
+        $to = $to ? " in $to" : '';
+        say "\r$name$to: $upd->{message}";
+        #say Dumper $upd;
+    }
+}
+
+package Teleperl::Command::Message;
+use base "CLI::Framework::Command";
+
+use Encode qw/encode_utf8 decode_utf8/;
+use Data::Dumper;
+
+sub complete_arg
+{
+    my ($self, $lastopt, $argnum, $text, $attribs) = @_;
+
+    my $tg = $self->cache->get('tg');
+
+    if ($argnum == 1) {
+        return ($tg->cached_nicknames(), $tg->cached_usernames());
+    }
+
+    return undef;
+
+}
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "user/chat must be specified" unless defined $args[0];
+    die "message text required" unless defined $args[1];
+}
+
+sub run
+{
+    my ($self, $opts, $peer, @msg) = @_;
+
+    my $tg = $self->cache->get('tg');
+
+    $peer = $tg->name_to_id($peer);
+
+    return "unknown user/chat" unless defined $peer;
+
+    $tg->send_text_message( to => $peer, message => join(' ', @msg) );
+}
+
+package Teleperl::Command::Debug;
+use base "CLI::Framework::Command";
+
+sub run
+{
+    my ($self, $opts, $val) = @_;
+
+    my $tg = $self->cache->get('tg');
+    $tg->{debug} = $val;
+
+    return "debug is set to $val";
+}
+
 1;
+
