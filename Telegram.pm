@@ -348,6 +348,11 @@ sub _cache_chats
                 title => $chat->{title}
             };
         }
+        else {
+            $self->{session}{chats}{$chat->{id}} = {
+                title => $chat->{title}
+            };
+        }
     }
 }
 

@@ -54,6 +54,8 @@ sub read_cmd
     my $term = $app->{_readline};
     unless ( $term ) {
         $term = $app->_init_interactive();
+        $term->{basic_word_break_characters} =~ s/@//g;
+        $term->{completer_word_break_characters} =~ s/@//g;
         $term->event_loop(
                            sub {
                                my $data = shift;
@@ -96,6 +98,7 @@ sub command_map
 {
     message => 'Teleperl::Command::Message',
     debug => 'Teleperl::Command::Debug',
+    dialogs => 'Teleperl::Command::Dialogs',
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
@@ -125,6 +128,7 @@ sub report_update
         my $to = $upd->{to_id};
         if ($to) {
             $to = $to->{channel_id} if $to->isa('Telegram::PeerChannel');
+            $to = $to->{chat_id} if $to->isa('Telegram::PeerChat');
             $to = $tg->peer_name($to);
         }
         $to = $to ? " in $to" : '';
@@ -186,5 +190,26 @@ sub run
     return "debug is set to $val";
 }
 
+package Teleperl::Command::Dialogs;
+use base "CLI::Framework::Command";
+
+use Data::Dumper;
+use Telegram::Messages::GetDialogs;
+use Telegram::InputPeer;
+
+sub run
+{
+    my $self = shift;
+    my $tg = $self->cache->get('tg');
+
+    $tg->invoke(
+        Telegram::Messages::GetDialogs->new(
+            offset_id => 0,
+            offset_date => 0,
+            offset_peer => Telegram::InputPeerEmpty->new,
+            limit => -1
+        )
+    );
+}
 1;
 
