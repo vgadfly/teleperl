@@ -33,6 +33,7 @@ use Telegram::Auth::SignIn;
 
 # Updates
 use Telegram::Updates::GetState;
+use Telegram::Account::UpdateStatus;
 
 # Messages
 use Telegram::Message;
@@ -114,6 +115,7 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
+    say Dumper $query if $self->{debug};
     if ($self->{_first}) {
         
         # Wrapper conn
@@ -167,7 +169,78 @@ sub update
 {
     my $self = shift;
 
-    $self->invoke( Telegram::Updates::GetState->new );
+    $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
+    $self->invoke( Telegram::Updates::GetState->new, sub {
+            my $us = shift;
+            if ($us->isa('Telegram::Updates::State')) {
+                $self->{session}{update_state}{seq} = $us->{seq};
+                $self->{session}{update_state}{pts} = $us->{pts};
+                $self->{session}{update_state}{date} = $us->{date};
+            }
+        } );
+}
+
+sub _handle_update
+{
+    my ($self, $upd) = @_;
+
+    if (exists $upd->{pts}) {
+        if ($upd->isa('Telegram::UpdateNewChannelMessage')) {
+            # channels seem to have own pts
+            # no official doc on this
+            my $ch_id = $upd->{message}{to_id}{channel_id};
+            $self->{session}{update_state}{channel_pts}{$ch_id} = $upd->{pts};
+        }
+        else {
+            $self->{session}{update_state}{pts} = $upd->{pts};
+        }
+    }
+    if ( $upd->isa('Telegram::UpdateNewMessage') or
+        $upd->isa('Telegram::UpdateNewChannelMessage') or
+        $upd->isa('Telegram::UpdateChatMessage') ) 
+    {
+        &{$self->{on_update}}($upd->{message}) if $self->{on_update};
+    }
+    # TODO: separate messages from other updates
+    #if ( $upd->isa('Telegram::UpdateChatUserTyping') ) {
+    #    &{$self->{on_update}}($upd) if $self->{on_update};
+    #}
+}
+
+sub _handle_short_update
+{
+    my ($self, $upd) = @_;
+
+    my $in_msg = $self->message_from_update( $upd );
+    &{$self->{on_update}}( $in_msg ) if $self->{on_update};
+}
+
+sub _handle_upd_seq
+{
+    my ($self, $seq) = @_;
+    if ($seq > 0) {
+        if ($seq > $self->{session}{update_state}{seq} + 1) {
+            # update hole
+            warn "\rupdate hole\n";
+        }
+        $self->{session}{update_state}{seq} = $seq;
+    }
+}
+
+sub _handle_rpc_result
+{
+    my ($self, $res) = @_;
+
+    my $req_id = $res->{req_msg_id};
+    say "Got result for $req_id" if $self->{debug};
+    if (defined $self->{_rpc_cbs}{$req_id}) {
+        &{$self->{_rpc_cbs}{$req_id}}( $res->{result} );
+        delete $self->{_rpc_cbs}{$req_id};
+    }
+    if ($res->{result}->isa('MTProto::RpcError')) {
+        # XXX: on_error
+        &{$self->{on_update}}( $res->{result} ) if defined $self->{on_update};
+    }
 }
 
 # XXX: not called
@@ -198,52 +271,42 @@ sub _get_msg_cb
         say Dumper $msg->{object} if $self->{debug};
 
         # RpcResults
-        if ( $msg->{object}->isa('MTProto::RpcResult') ) {
-            my $req_id = $msg->{object}{req_msg_id};
-            say "Got result for $req_id" if $self->{debug};
-            if (defined $self->{_rpc_cbs}{$req_id}) {
-                &{$self->{_rpc_cbs}{$req_id}}( $msg->{object}{result} );
-                delete $self->{_rpc_cbs}{$req_id};
-            }
-            if ($msg->{object}{result}->isa('MTProto::RpcError')) {
-                # XXX: on_error
-                &{$self->{on_update}}( $msg->{object}{result} ) if defined $self->{on_update};
-            }
-        }
+        $self->_handle_rpc_result( $msg->{object} )
+        if ( $msg->{object}->isa('MTProto::RpcResult') );
 
         # short spec updates
         if ( $msg->{object}->isa('Telegram::UpdateShortMessage') or
             $msg->{object}->isa('Telegram::UpdateShortChannelMessage') or
             $msg->{object}->isa('Telegram::UpdateShortChatMessage') )
         {
-            my $in_msg = $self->message_from_update( $msg->{object} );
-            &{$self->{on_update}}( $in_msg ) if $self->{on_update};
+            $self->_handle_short_update( $msg->{object} );
         }
 
         # regular updates
         if ( $msg->{object}->isa('Telegram::Updates') ) {
             $self->_cache_users( @{$msg->{object}{users}} );
             $self->_cache_chats( @{$msg->{object}{chats}} );
-
+            $self->_handle_upd_seq( $msg->{object}{seq} );
+            
             for my $upd ( @{$msg->{object}{updates}} ) {
-                if ( $upd->isa('Telegram::UpdateNewMessage') or
-                    $upd->isa('Telegram::UpdateNewChannelMessage') or
-                    $upd->isa('Telegram::UpdateChatMessage') ) 
-                {
-                    &{$self->{on_update}}($upd->{message}) if $self->{on_update};
-                }
-            } 
+                $self->_handle_update($upd);
+            }
         }
 
         # short generic updates
         if ( $msg->{object}->isa('Telegram::UpdateShort') ) {
-            my $upd = $msg->{object}{update};
-            if ( $upd->isa('Telegram::UpdateNewMessage') or
-                $upd->isa('Telegram::UpdateNewChannelMessage') or
-                $upd->isa('Telegram::UpdateChatMessage') ) 
-            {
-                &{$self->{on_update}}($upd->{message}) if $self->{on_update};
-            }
+            $self->_handle_update( $msg->{object}{update} );
+        }
+        
+        # updates difference
+        if ( $msg->{object}->isa('Telegram::Updates::Difference') ) {
+
+            my $upd_state = $msg->{state};
+            $self->{session}{update_state}{seq} = $upd_state->{seq};
+            $self->{session}{update_state}{date} = $upd_state->{date};
+            $self->{session}{update_state}{pts} = $upd_state->{pts};
+
+            # TODO: handle updates
         }
     }
 }
@@ -340,18 +403,32 @@ sub _cache_chats
     my ($self, @chats) = @_;
     
     for my $chat (@chats) {
-        # old regular chats don't have access_hash o_O
-        if (exists $chat->{access_hash}) {
-            $self->{session}{chats}{$chat->{id}} = {
-                access_hash => $chat->{access_hash},
-                username => $chat->{username},
-                title => $chat->{title}
-            };
+        if (exists $self->{session}{chats}{$chat->{id}}) {
+            # old regular chats don't have access_hash o_O
+            if (exists $chat->{access_hash}) {
+                $self->{session}{chats}{$chat->{id}}{access_hash} = $chat->{access_hash};
+                $self->{session}{chats}{$chat->{id}}{username} = $chat->{username};
+                $self->{session}{chats}{$chat->{id}}{title} = $chat->{title};    
+            }
+            else {
+                $self->{session}{chats}{$chat->{id}}{title} = $chat->{title};
+            }
+
         }
         else {
-            $self->{session}{chats}{$chat->{id}} = {
-                title => $chat->{title}
-            };
+            # old regular chats don't have access_hash o_O
+            if (exists $chat->{access_hash}) {
+                $self->{session}{chats}{$chat->{id}} = {
+                    access_hash => $chat->{access_hash},
+                    username => $chat->{username},
+                    title => $chat->{title}
+                };
+            }
+            else {
+                $self->{session}{chats}{$chat->{id}} = {
+                    title => $chat->{title}
+                };
+            }
         }
     }
 }
@@ -401,6 +478,61 @@ sub name_to_id
     return undef;
 }
 
+sub peer
+{
+    my ($self, $nick) = @_;
+
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
+
+    if ($nick =~ /^@/) {
+        $nick =~ s/^@//;
+        for my $uid (keys %$users) {
+            return Telegram::InputPeerUser->new( 
+                user_id => $uid, 
+                access_hash => $users->{$uid}{access_hash}
+            ) if defined $users->{$uid}{username} and $users->{$uid}{username} eq $nick;
+        }
+        for my $uid (keys %$chats) {
+            return Telegram::InputPeerChat->new( 
+                chat_id => $uid, 
+                access_hash => $chats->{$uid}{access_hash}
+            ) if defined $chats->{$uid}{username} and $chats->{$uid}{username} eq $nick;
+        }
+    }
+    return undef;
+}
+
+sub peer_from_id
+{
+    my ($self, $id) = @_;
+    croak unless defined $id;
+
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
+
+    if (exists $users->{$id}) {
+        return Telegram::InputPeerUser->new( 
+            user_id => $id, 
+            access_hash => $users->{$id}{access_hash}
+        );
+    }
+    if (exists $chats->{$id}) {
+        if (defined $chats->{$id}{access_hash}) {
+            return Telegram::InputPeerChannel->new( 
+                channel_id => $id, 
+                access_hash => $chats->{$id}{access_hash}
+            );
+        }
+        else {
+            return Telegram::InputPeerChat->new( 
+                chat_id => $id, 
+            );
+        }
+    }
+    return undef;
+}
+
 sub peer_name
 {
     my ($self, $id) = @_;
@@ -425,7 +557,13 @@ sub _get_timer_cb
     my $self = shift;
     return sub {
         say "timer tick" if $self->{debug};
-        $self->invoke( Telegram::Updates::GetState->new ) unless $self->{noupdate};
+        $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
+        $self->invoke( Telegram::Updates::GetDifference->new( 
+                    date => $self->{session}{update_state}{date},
+                    pts => $self->{session}{update_state}{pts},
+                    qts => -1,
+            ) ) unless $self->{noupdate};
+        #$self->invoke( Telegram::Updates::GetState->new ) unless $self->{noupdate};
         $self->{_mt}->invoke( MTProto::Ping->new( ping_id => rand(65536) ) ) if $self->{keepalive};
     }
 }
