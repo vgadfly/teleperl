@@ -104,7 +104,8 @@ for my $type (@{$parser->YYData->{funcs}}) {
 }
 
 my @types = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{types}};
-my @funcs = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{funcs}};
+#my @funcs = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{funcs}};
+my @funcs = @{$parser->YYData->{funcs}};
 
 my %typeset;
 for my $type (@types) {
@@ -116,6 +117,7 @@ push @types, @funcs;
 for my $type (@types) {
     my ($path, $pkg) = pkgname($prefix, $type->{id});
     my ($basepath, $basepkg) = pkgname($prefix, $type->{type}{name});
+    $basepkg .= 'ABC'; # Abstract Base Class
     my $hash = $type->{hash}; # crc
     $hash =~ s/^\#//;
     $path = $basepath unless $type->{func};
@@ -124,10 +126,12 @@ for my $type (@types) {
     make_path(dirname($path)); 
     open my $f, ">>$path" or die "$!";
 
-    unless (exists $typeset{$basepkg}) {
-        print $f "package $basepkg;\n1;\n\n";
+    unless ($type->{func}) {
+        unless (exists $typeset{$basepkg}) {
+            print $f "package $basepkg;\n1;\n\n";
+            $typeset{$basepkg} = undef;
+        }
     }
-
     print $f "package $pkg;\nuse base 'TL::Object';\n\n";
 
     unless ($type->{func}) {
