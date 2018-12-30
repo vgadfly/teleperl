@@ -189,6 +189,9 @@ sub unpack_obj
         #warn "left: ".join(",", map { sprintf("0x%x", $_ ) } map { unpack( "L<", $_ ) } @$stream);
         return $obj;
     }
+    return bless({}, 'TL::False') if ($hash == 0xbc799737); # boolFalse
+    return bless({v=>1}, 'TL::True') if ($hash == 0x997275b5); # boolTrue
+
     warn "unknown object type: 0x".sprintf("%x", $hash);
     return undef;
 }
