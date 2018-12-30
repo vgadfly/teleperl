@@ -33,10 +33,12 @@ sub init {
         session => $session,
         reconnect => 1,
         keepalive => 1,
-        noupdate => 1,
+        noupdate => 0,
         debug => 0
     );
-    $tg->{on_update} = sub {$app->report_update(@_)};
+    $tg->{on_update} = sub {
+        $app->report_update(@_);
+    };
     $tg->start;
     $tg->update;
 
@@ -99,6 +101,11 @@ sub command_map
     message => 'Teleperl::Command::Message',
     debug => 'Teleperl::Command::Debug',
     dialogs => 'Teleperl::Command::Dialogs',
+    media => 'Teleperl::Command::Media',
+    users => 'Teleperl::Command::Users',
+    chats => 'Teleperl::Command::Chats',
+    updates => 'Teleperl::Command::Updates',
+    history => 'Teleperl::Command::History',
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
@@ -115,6 +122,9 @@ sub command_alias
     msg => 'message'
 }
 
+use Telegram::Messages::ForwardMessages;
+use Telegram::InputPeer;
+
 sub report_update
 {
     my ($self, $upd) = @_;
@@ -126,14 +136,35 @@ sub report_update
     if ($upd->isa('Telegram::Message')) {
         my $name = $tg->peer_name($upd->{from_id});
         my $to = $upd->{to_id};
+        my $ip = $tg->peer_from_id($upd->{from_id});
         if ($to) {
-            $to = $to->{channel_id} if $to->isa('Telegram::PeerChannel');
-            $to = $to->{chat_id} if $to->isa('Telegram::PeerChat');
+            if ($to->isa('Telegram::PeerChannel')) {
+                $to = $to->{channel_id};
+            }
+            if ($to->isa('Telegram::PeerChat')) {
+                $to = $to->{chat_id};
+            }
+            $ip = $tg->peer_from_id($to);
             $to = $tg->peer_name($to);
         }
         $to = $to ? " in $to" : '';
+
+        $tg->invoke(Telegram::Messages::ForwardMessages->new(
+                id => [ $upd->{id} ],
+                from_peer => $ip,
+                to_peer => Telegram::InputPeerSelf->new,
+                random_id => [ int(rand(65536)) ]
+        )) if defined $ip;
+
         say "\r$name$to: $upd->{message}";
         #say Dumper $upd;
+    }
+    if ($upd->isa('Telegram::UpdateChatUserTyping')) {
+        my $user = $tg->peer_name($upd->{user_id});
+        my $chat = $tg->peer_name($upd->{chat_id});
+        if (defined $user and defined $chat) {
+            say "\n$user is typing in $chat...";
+        }
     }
 }
 
@@ -211,5 +242,123 @@ sub run
         )
     );
 }
+
+package Teleperl::Command::Media;
+use base "CLI::Framework::Command";
+
+use Telegram::Messages::SendMedia;
+use Telegram::InputMedia;
+
+sub run
+{
+    my ($self, $opts, $peer, $msg) = @_;
+    my $tg = $self->cache->get('tg');
+
+    $tg->invoke(
+        Telegram::Messages::SendMedia->new(
+            peer => $tg->peer($peer),
+            media => Telegram::InputMediaDocumentExternal->new(
+                url => $msg,
+                caption => $msg
+            ),
+            random_id => int(rand(65536))
+        )
+    );
+}
+
+package Teleperl::Command::Users;
+use base "CLI::Framework::Command";
+
+use Data::Dumper;
+
+sub run
+{
+    my ($self, $opts, $peer, $msg) = @_;
+    my $tg = $self->cache->get('tg');
+
+    say Dumper $tg->{session}{users};
+}
+
+package Teleperl::Command::Chats;
+use base "CLI::Framework::Command";
+
+use Data::Dumper;
+
+sub run
+{
+    my ($self, $opts, $peer, $msg) = @_;
+    my $tg = $self->cache->get('tg');
+
+    say Dumper $tg->{session}{chats};
+}
+
+package Teleperl::Command::Updates;
+use base "CLI::Framework::Command";
+
+use Telegram::Updates::GetState;
+use Telegram::Updates::GetDifference;
+use Data::Dumper;
+
+sub run
+{
+    my ($self, $opts, $peer, $msg) = @_;
+    my $tg = $self->cache->get('tg');
+
+    #$tg->invoke( Telegram::Updates::GetState->new, sub {say Dumper @_});
+    $tg->invoke( Telegram::Updates::GetDifference->new(
+            date => $tg->{session}{update_state}{date},
+            pts => $tg->{session}{update_state}{pts},
+            qts => -1,
+        ), sub {say Dumper @_});
+}
+
+package Teleperl::Command::History;
+use base "CLI::Framework::Command";
+
+use Telegram::Messages::GetHistory;
+use Data::Dumper;
+
+sub complete_arg
+{
+    my ($self, $lastopt, $argnum, $text, $attribs) = @_;
+
+    my $tg = $self->cache->get('tg');
+
+    if ($argnum == 1) {
+        return ($tg->cached_nicknames());
+    }
+
+    return undef;
+
+}
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "user/chat must be specified" unless defined $args[0];
+}
+
+sub run
+{
+    my ($self, $opts, $peer, @msg) = @_;
+
+    my $tg = $self->cache->get('tg');
+
+    $peer = $tg->name_to_id($peer);
+    $peer = $tg->peer_from_id($peer);
+
+    return "unknown user/chat" unless defined $peer;
+
+    $tg->invoke( Telegram::Messages::GetHistory->new(
+            peer => $peer,
+            offset_id => 0,
+            offset_date => 0,
+            add_offset => 0,
+            limit => 10,
+            max_id => 0,
+            min_id => 0
+        ), sub {say Dumper @_} );
+}
+
 1;
 
