@@ -201,6 +201,10 @@ sub _handle_update
     {
         &{$self->{on_update}}($upd->{message}) if $self->{on_update};
     }
+    if ( $upd->isa('Telegram::UpdateChannelTooLong') ) {
+        warn "UpdateChannelTooLong";
+        say Dumper $upd;
+    }
     # TODO: separate messages from other updates
     #if ( $upd->isa('Telegram::UpdateChatUserTyping') ) {
     #    &{$self->{on_update}}($upd) if $self->{on_update};
@@ -298,16 +302,31 @@ sub _get_msg_cb
             $self->_handle_update( $msg->{object}{update} );
         }
         
-        # updates difference
-        if ( $msg->{object}->isa('Telegram::Updates::Difference') ) {
-
-            my $upd_state = $msg->{state};
-            $self->{session}{update_state}{seq} = $upd_state->{seq};
-            $self->{session}{update_state}{date} = $upd_state->{date};
-            $self->{session}{update_state}{pts} = $upd_state->{pts};
-
-            # TODO: handle updates
+        if ( $msg->{object}->isa('Telegram::UpdatesTooLong') ) {
+            warn "UpdatesTooLong";
         }
+    }
+}
+
+sub _handle_upd_diff
+{
+    my ($self, $diff) = @_;
+
+    return unless $diff->isa('Telegram::Updates::Difference');
+
+    my $upd_state = $diff->{state};
+    $self->{session}{update_state}{seq} = $upd_state->{seq};
+    $self->{session}{update_state}{date} = $upd_state->{date};
+    $self->{session}{update_state}{pts} = $upd_state->{pts};
+
+    $self->_cache_users(@{$diff->{users}});
+    $self->_cache_chats(@{$diff->{chats}});
+    
+    for my $upd (@{$diff->{other_updates}}) {
+        $self->_handle_update( $upd );
+    }
+    for my $msg (@{$diff->{new_messages}}) {
+        &{$self->{on_update}}($msg) if $self->{on_update};
     }
 }
 
@@ -562,7 +581,10 @@ sub _get_timer_cb
                     date => $self->{session}{update_state}{date},
                     pts => $self->{session}{update_state}{pts},
                     qts => -1,
-            ) ) unless $self->{noupdate};
+            ), 
+            sub {
+                $self->_handle_upd_diff(@_);
+            }) unless $self->{noupdate};
         #$self->invoke( Telegram::Updates::GetState->new ) unless $self->{noupdate};
         $self->{_mt}->invoke( MTProto::Ping->new( ping_id => rand(65536) ) ) if $self->{keepalive};
     }

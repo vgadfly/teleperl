@@ -40,7 +40,7 @@ sub init {
         $app->report_update(@_);
     };
     $tg->start;
-    $tg->update;
+    #$tg->update;
 
     $app->cache->set( 'conf' => $conf );
     $app->cache->set( 'tg' => $tg );
