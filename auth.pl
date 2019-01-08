@@ -61,12 +61,14 @@ my $conn = Telegram::InitConnection->new(
         device_model => 'IBM PC/AT',
         system_version => 'DOS 6.22',
         app_version => '0.01',
+        system_lang_code => 'en',
+        lang_pack => '',
         lang_code => 'en',
         query => $query
 );
 
 # Wrapper layer
-$mt->invoke( Telegram::InvokeWithLayer->new( layer => 66, query => $conn ) );
+$mt->invoke( Telegram::InvokeWithLayer->new( layer => 76, query => $conn ) );
 
 $mt->{on_message} = sub {
     my $msg = shift;
@@ -99,7 +101,7 @@ $mt->{on_message} = sub {
 
 $signal = AnyEvent->signal( signal => 'INT', cb => sub {
         say STDERR "INT recvd";
-        store( $mt->{session}, 'session.dat');
+        store( {mtproto => $mt->{session}}, 'session.dat');
         $cond->send;
     } );
 

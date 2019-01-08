@@ -109,7 +109,7 @@ sub start
             debug => $self->{debug}
     );
     
-    $self->{_timer} = AnyEvent->timer( after => 30, interval => 60, cb => $self->_get_timer_cb );
+    $self->{_timer} = AnyEvent->timer( after => 45, interval => 45, cb => $self->_get_timer_cb );
     
     unless (exists $self->{session}{update_state}) {
         $self->invoke( Telegram::Updates::GetState->new, sub {
@@ -140,7 +140,7 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
-    say Dumper $query;# if $self->{debug};
+    say Dumper $query if $self->{debug};
     if ($self->{_first}) {
         
         # Wrapper conn
@@ -149,11 +149,13 @@ sub invoke
                 device_model => 'IBM PC/AT',
                 system_version => 'DOS 6.22',
                 app_version => '0.01',
+                system_lang_code => 'en',
+                lang_pack => '',
                 lang_code => 'en',
                 query => $query
         );
 
-        $req_id = $self->{_mt}->invoke( Telegram::InvokeWithLayer->new( layer => 66, query => $conn ) );
+        $req_id = $self->{_mt}->invoke( Telegram::InvokeWithLayer->new( layer => 76, query => $conn ) );
 
         $self->{_first} = 0;
     }
@@ -216,7 +218,7 @@ sub _debug_print_update
         say "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{channel_pts}{$ch_id}"
             if (exists $upd->{pts});
     }
-    else {
+    elsif ($upd->isa('Telegram::Update::UpdateNewMessage')) {
         say "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{pts}"
             if (exists $upd->{pts});
     }
@@ -233,7 +235,7 @@ sub _handle_update
 {
     my ($self, $upd) = @_;
 
-    $self->_debug_print_update($upd);
+    #$self->_debug_print_update($upd);
     
     if ($upd->isa('Telegram::UpdateChannelTooLong')) {
         $self->invoke(
@@ -271,7 +273,7 @@ sub _handle_update
             $self->{session}{update_state}{channel_pts}{$ch_id} = $upd->{pts};
         }
         else {
-            if ( $self->{session}{update_state}{pts} + $upd->{pts_count} < $upd->{pts} ) {
+            if ( $self->{session}{update_state}{pts} + 1 < $upd->{pts} ) {
                 warn "bad pts in update\n";
                 say Dumper $upd;
             }
@@ -343,10 +345,14 @@ sub _handle_upd_diff
     return if $diff->isa('Telegram::Updates::DifferenceEmpty');
     return if $diff->isa('Telegram::Updates::ChannelDifferenceEmpty');
 
-    my @t = localtime;
-    print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
-    say ref $diff;
-   
+    #my @t = localtime;
+    #print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
+    #say ref $diff;
+  
+    if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
+        warn "don't now how to handle ChannelDifferenceTooLong";
+        return;
+    }
     my $upd_state;
     if ($diff->isa('Telegram::Updates::Difference')) {
         $upd_state = $diff->{state};
@@ -367,7 +373,7 @@ sub _handle_upd_diff
             say Dumper $diff;
             return;
         }
-        say "new pts=$upd_state->{pts}, last=$self->{session}{update_state}{pts}";
+        #say "new pts=$upd_state->{pts}, last=$self->{session}{update_state}{pts}";
         $self->{session}{update_state}{seq} = $upd_state->{seq};
         $self->{session}{update_state}{date} = $upd_state->{date};
         $self->{session}{update_state}{pts} = $upd_state->{pts};
@@ -383,7 +389,7 @@ sub _handle_upd_diff
         $self->_handle_update( $upd );
     }
     for my $msg (@{$diff->{new_messages}}) {
-        say ref $msg;
+        #say ref $msg;
         &{$self->{on_update}}($msg) if $self->{on_update};
     }
 }
@@ -402,11 +408,8 @@ sub _handle_upd_diff
 ##      - pts   -   some number concerning messages, excluding channels, 
 ##                  "number of actions in message box", the magic number of updates
 ##      - qts   -   same, but in secret chats
-##      - date
-##      - seq   -   number on sent updates
-##
-##  Server MAY not send updates on every event, observed in super(mega)groups 
-##  and channels with 300+ participants. Most clients poll.
+##      - date  -   not sure, if used anywhere
+##      - seq   -   number on sent updates (not content-related)
 ##
 ##  Channels (and supergroups) mantain own pts, used in GetChannelDifference call.
 ##
@@ -415,9 +418,9 @@ sub _handle_upd_diff
 sub _handle_updates
 {
     my ($self, $updates) = @_;
-    my @t = localtime;
-    print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
-    $self->_debug_print_update($updates);
+    #my @t = localtime;
+    #print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
+    #$self->_debug_print_update($updates);
 
     # short spec updates
     if ( $updates->isa('Telegram::UpdateShortMessage') or
@@ -445,7 +448,14 @@ sub _handle_updates
     }
     
     if ( $updates->isa('Telegram::UpdatesTooLong') ) {
-        warn "teleperl is not designed to handle UpdatesTooLong ;)\n";
+                $self->invoke( Telegram::Updates::GetDifference->new( 
+                    date => $self->{session}{update_state}{date},
+                    pts => $self->{session}{update_state}{pts},
+                    qts => -1,
+            ), 
+            sub {
+                $self->_handle_upd_diff(@_);
+            });
     }
 }
 
@@ -748,14 +758,14 @@ sub _get_timer_cb
     return sub {
         say "timer tick" if $self->{debug};
         $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
-        $self->invoke( Telegram::Updates::GetDifference->new( 
-                    date => $self->{session}{update_state}{date},
-                    pts => $self->{session}{update_state}{pts},
-                    qts => -1,
-            ), 
-            sub {
-                $self->_handle_upd_diff(@_);
-            }) unless $self->{noupdate};
+        #        $self->invoke( Telegram::Updates::GetDifference->new( 
+        #            date => $self->{session}{update_state}{date},
+        #            pts => $self->{session}{update_state}{pts},
+        #            qts => -1,
+        #    ), 
+        #    sub {
+        #        $self->_handle_upd_diff(@_);
+        #    }) unless $self->{noupdate};
         #$self->invoke( Telegram::Updates::GetState->new ) unless $self->{noupdate};
         $self->{_mt}->invoke( MTProto::Ping->new( ping_id => rand(65536) ) ) if $self->{keepalive};
     }

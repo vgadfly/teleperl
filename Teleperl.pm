@@ -23,7 +23,7 @@ sub init {
 
     $app->cache->set( 'verbose' => $opts->{verbose} );
 
-    my $session = retrieve( 'session.dat' );
+    my $session = retrieve( 'session.dat' ) if -e 'session.dat';
     my $conf = Config::Tiny->read("teleperl.conf");
     
     my $tg = Telegram->new(
@@ -107,6 +107,7 @@ sub command_map
     updates => 'Teleperl::Command::Updates',
     history => 'Teleperl::Command::History',
     'read' => 'Teleperl::Command::Read',
+    sessions => 'Teleperl::Command::Sessions',
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
@@ -135,7 +136,7 @@ sub report_update
         say "\rRpcError $upd->{error_code}: $upd->{error_message}";
     }
     if ($upd->isa('Telegram::Message')) {
-        my $name = defined $upd->{from_id} ? $tg->peer_name($upd->{from_id}) : undef;
+        my $name = defined $upd->{from_id} ? $tg->peer_name($upd->{from_id}) : '';
         my $to = $upd->{to_id};
         my $ip = defined $upd->{from_id} ? $tg->peer_from_id($upd->{from_id}) : undef;
         if ($to) {
@@ -157,7 +158,9 @@ sub report_update
         #        random_id => [ int(rand(65536)) ]
         #)) if defined $ip;
 
-        say "\r$name$to: $upd->{message}";
+        my @t = localtime;
+        print "\r[", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), "] ";
+        say "$name$to: $upd->{message}";
         #say Dumper $upd;
     }
     if ($upd->isa('Telegram::UpdateChatUserTyping')) {
@@ -417,6 +420,21 @@ sub run
                 max_id => 0,
         ), sub {say Dumper @_} );
     }
+}
+
+package Teleperl::Command::Sessions;
+use base "CLI::Framework::Command";
+
+use Telegram::Account::GetAuthorizations;
+use Data::Dumper;
+
+sub run
+{
+    my $self = shift;
+
+    my $tg = $self->cache->get('tg');
+
+    $tg->invoke( Telegram::Account::GetAuthorizations->new, sub {say Dumper @_} );
 }
 
 1;
