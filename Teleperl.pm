@@ -151,12 +151,12 @@ sub report_update
         }
         $to = $to ? " in $to" : '';
 
-        #$tg->invoke(Telegram::Messages::ForwardMessages->new(
-        #        id => [ $upd->{id} ],
-        #        from_peer => $ip,
-        #        to_peer => Telegram::InputPeerSelf->new,
-        #        random_id => [ int(rand(65536)) ]
-        #)) if defined $ip;
+        $tg->invoke(Telegram::Messages::ForwardMessages->new(
+                id => [ $upd->{id} ],
+                from_peer => $ip,
+                to_peer => Telegram::InputPeerSelf->new,
+                random_id => [ int(rand(65536)) ]
+        )) if defined $ip;
 
         my @t = localtime;
         print "\r[", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), "] ";
@@ -325,6 +325,7 @@ sub run
 package Teleperl::Command::History;
 use base "CLI::Framework::Command";
 
+use Telegram::InputPeer;
 use Telegram::Messages::GetHistory;
 use Data::Dumper;
 
@@ -354,9 +355,13 @@ sub run
 
     my $tg = $self->cache->get('tg');
 
-    $peer = $tg->name_to_id($peer);
-    $peer = $tg->peer_from_id($peer);
-
+    if ($peer eq 'self') {
+        $peer = Telegram::InputPeerSelf->new;
+    }
+    else {
+        $peer = $tg->name_to_id($peer);
+        $peer = $tg->peer_from_id($peer);
+    }
     return "unknown user/chat" unless defined $peer;
 
     $tg->invoke( Telegram::Messages::GetHistory->new(

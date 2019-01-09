@@ -207,6 +207,47 @@ sub update
         } );
 }
 
+sub _check_pts
+{
+    my ($self, $pts, $count, $channel) = @_;
+
+    my $local_pts = defined $channel ? 
+        $self->{session}{update_state}{channel_pts}{$channel} :
+        $self->{session}{update_state}{pts};
+
+    if ($local_pts + $count < $pts) {
+        if (defined $channel) {
+            $self->invoke( Telegram::Updates::GetChannelDifference->new(
+                channel => $self->peer_from_id( $channel ),
+                filter => Telegram::ChannelMessagesFilterEmpty->new,
+                pts => $local_pts,
+                limit => 0
+            ),
+            sub { $self->_handle_channel_diff( $channel, @_ ) }
+            );
+        }
+        else {
+            $self->invoke( Telegram::Updates::GetDifference->new( 
+                date => $self->{session}{update_state}{date},
+                pts => $local_pts,
+                qts => -1,
+            ), 
+            sub {$self->_handle_upd_diff(@_) }
+        );
+        }
+        return 0;
+    }
+    else {
+        if (defined $channel) {
+            $self->{session}{update_state}{channel_pts}{$channel} = $pts;
+        }
+        else {
+            $self->{session}{update_state}{pts} = $pts;
+        }
+        return 1;
+    }
+}
+
 sub _debug_print_update
 {
     my ($self, $upd) = @_;
@@ -235,6 +276,8 @@ sub _handle_update
 {
     my ($self, $upd) = @_;
 
+    #say ref $upd;
+
     #$self->_debug_print_update($upd);
     
     if ($upd->isa('Telegram::UpdateChannelTooLong')) {
@@ -245,49 +288,45 @@ sub _handle_update
                 pts => $self->{session}{update_state}{channel_pts}{$upd->{channel_id}},
                 limit => 0
             ),
-            sub { $self->_handle_upd_diff(@_) }
+            sub { $self->_handle_channel_diff( $upd->{channel_id}, @_ ) }
+        );
+        return;
+    }
+    
+    my $pts_good;
+    if (
+        $upd->isa('Telegram::UpdateNewChannelMessage') or
+        $upd->isa('Telegram::UpdateEditChannelMessage')
+    ) {
+        $pts_good = $self->_check_pts( 
+            $upd->{pts}, $upd->{pts_count}, 
+            $upd->{message}{to_id}{channel_id}
         );
     }
-    # XXX: pts_count must be handled here to fill update holes
-    if (exists $upd->{pts}) {
-        if (
-            $upd->isa('Telegram::UpdateNewChannelMessage') or 
-            $upd->isa('Telegram::UpdateEditChannelMessage') or 
-            $upd->isa('Telegram::UpdateChannelWebPage') 
-        ) {
-            # channels seem to have own pts
-            # no official doc on this
-            my $ch_id = $upd->{message}{to_id}{channel_id};
-            if ( $self->{session}{update_state}{channel_pts} + 1 < $upd->{pts} ) {
-                warn "bad pts in update\n";
-                say Dumper $upd;
-            }
-            $self->{session}{update_state}{channel_pts}{$ch_id} = $upd->{pts};
-        }
-        elsif ($upd->isa('Telegram::UpdateDeleteChannelMessages')) {
-            my $ch_id = $upd->{channel_id};
-            if ( $self->{session}{update_state}{channel_pts} + 1 < $upd->{pts} ) {
-                warn "bad pts in update\n";
-                say Dumper $upd;
-            }
-            $self->{session}{update_state}{channel_pts}{$ch_id} = $upd->{pts};
-        }
-        else {
-            if ( $self->{session}{update_state}{pts} + 1 < $upd->{pts} ) {
-                warn "bad pts in update\n";
-                say Dumper $upd;
-            }
-            $self->{session}{update_state}{pts} = $upd->{pts};
-        }
+    if (
+        $upd->isa('Telegram::UpdateDeleteChannelMessages') or 
+        $upd->isa('Telegram::UpdateChannelWebPage') 
+    ) {
+        $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count}, $upd->{channel_id} );
+    }
+    if ( 
+        $upd->isa('Telegram::UpdateNewMessage') or
+        $upd->isa('Telegram::UpdateEditMessage') or
+        $upd->isa('Telegram::UpdateDeleteMessages') or 
+        $upd->isa('Telegram::UpdateWebPage') 
+    ) {
+        $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count} );
     }
 
-    if ( $upd->isa('Telegram::UpdateNewMessage') or
-        $upd->isa('Telegram::UpdateNewChannelMessage') or
-        $upd->isa('Telegram::UpdateChatMessage') ) 
-    {
-        &{$self->{on_update}}($upd->{message}) if $self->{on_update};
+    if ($pts_good) {    
+        if ( 
+            $upd->isa('Telegram::UpdateNewChannelMessage') or
+            $upd->isa('Telegram::UpdateNewMessage')
+        ) {
+            &{$self->{on_update}}($upd->{message}) if $self->{on_update};
+        }
     }
-    # TODO: separate messages from other updates
+        # TODO: separate messages from other updates
     #if ( $upd->isa('Telegram::UpdateChatUserTyping') ) {
     #    &{$self->{on_update}}($upd) if $self->{on_update};
     #}
@@ -296,23 +335,6 @@ sub _handle_update
 sub _handle_short_update
 {
     my ($self, $upd) = @_;
-
-    # XXX: pts_count must be handled here to fill update holes
-    if (exists $upd->{pts}) {
-        if ( $self->{session}{update_state}{pts} + $upd->{pts_count} < $upd->{pts} ) {
-            warn "bad pts in update\n";
-            say Dumper $upd;
-        }
-        if ($upd->isa('Telegram::UpdateNewChannelMessage')) {
-            # channels seem to have own pts
-            # no official doc on this
-            my $ch_id = $upd->{message}{to_id}{channel_id};
-            $self->{session}{update_state}{channel_pts}{$ch_id} = $upd->{pts};
-        }
-        else {
-            $self->{session}{update_state}{pts} = $upd->{pts};
-        }
-    }
 
     my $in_msg = $self->message_from_update( $upd );
     &{$self->{on_update}}( $in_msg ) if $self->{on_update};
@@ -335,24 +357,18 @@ sub _handle_upd_diff
 {
     my ($self, $diff) = @_;
 
-    unless (
-        $diff->isa('Telegram::Updates::DifferenceABC') or
-        $diff->isa('Telegram::Updates::ChannelDifferenceABC')
-    ) {
+    #say ref $diff;
+
+    unless ( $diff->isa('Telegram::Updates::DifferenceABC') ) {
         warn "not diff: " . ref $diff;
         return;
     }
     return if $diff->isa('Telegram::Updates::DifferenceEmpty');
-    return if $diff->isa('Telegram::Updates::ChannelDifferenceEmpty');
 
     #my @t = localtime;
     #print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
     #say ref $diff;
   
-    if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
-        warn "don't now how to handle ChannelDifferenceTooLong";
-        return;
-    }
     my $upd_state;
     if ($diff->isa('Telegram::Updates::Difference')) {
         $upd_state = $diff->{state};
@@ -367,21 +383,50 @@ sub _handle_upd_diff
             sub { $self->_handle_upd_diff(@_) }
         );
     }
+    unless (defined $upd_state) {
+        warn "bad update state";
+        say Dumper $diff;
+        return;
+    }
+    #say "new pts=$upd_state->{pts}, last=$self->{session}{update_state}{pts}";
+    $self->{session}{update_state}{seq} = $upd_state->{seq};
+    $self->{session}{update_state}{date} = $upd_state->{date};
+    $self->{session}{update_state}{pts} = $upd_state->{pts};
+    
+    $self->_cache_users(@{$diff->{users}});
+    $self->_cache_chats(@{$diff->{chats}});
+    
+    for my $upd (@{$diff->{other_updates}}) {
+        $self->_handle_update( $upd );
+    }
+    for my $msg (@{$diff->{new_messages}}) {
+        #say ref $msg;
+        &{$self->{on_update}}($msg) if $self->{on_update};
+    }
+}
+
+sub _handle_channel_diff
+{
+    my ($self, $channel, $diff) = @_;
+
+    #say ref $diff;
+    
     unless ( $diff->isa('Telegram::Updates::ChannelDifferenceABC') ) {
-        unless (defined $upd_state) {
-            warn "bad update state";
-            say Dumper $diff;
-            return;
-        }
-        #say "new pts=$upd_state->{pts}, last=$self->{session}{update_state}{pts}";
-        $self->{session}{update_state}{seq} = $upd_state->{seq};
-        $self->{session}{update_state}{date} = $upd_state->{date};
-        $self->{session}{update_state}{pts} = $upd_state->{pts};
+        warn "not diff: " . ref $diff;
+        return;
     }
-    else {
-        # ChannelDifference does not contain channel_id (sic!)
-        #$self->{session}{update_state}{channel_pts}{$diff->{channel_id}} = $upd_state->{pts};  
+    return if $diff->isa('Telegram::Updates::ChannelDifferenceEmpty');
+
+    #my @t = localtime;
+    #print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
+    #say ref $diff;
+  
+    if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
+        warn "don't now how to handle ChannelDifferenceTooLong";
+        return;
     }
+    $self->{session}{update_state}{channel_pts}{$channel} = $diff->{pts};  
+
     $self->_cache_users(@{$diff->{users}});
     $self->_cache_chats(@{$diff->{chats}});
     
@@ -423,13 +468,17 @@ sub _handle_updates
     #$self->_debug_print_update($updates);
 
     # short spec updates
+    # ShortSentMessage?
     if ( $updates->isa('Telegram::UpdateShortMessage') or
-        $updates->isa('Telegram::UpdateShortChannelMessage') or
         $updates->isa('Telegram::UpdateShortChatMessage') )
     {
-        $self->_handle_short_update( $updates );
+        $self->_handle_upd_seq_date( 0, $updates->{date} );
+        if ( $self->_check_pts( $updates->{pts}, $updates->{pts_count} ) ) {
+            $self->_handle_short_update( $updates );
+        }
     }
 
+    # XXX: UpdatesCombined
     # regular updates
     if ( $updates->isa('Telegram::Updates') ) {
         $self->_cache_users( @{$updates->{users}} );
@@ -443,19 +492,18 @@ sub _handle_updates
 
     # short generic updates
     if ( $updates->isa('Telegram::UpdateShort') ) {
-        $self->_handle_update( $updates->{update} );
         $self->_handle_upd_seq_date( 0, $updates->{date} );
+        $self->_handle_update( $updates->{update} );
     }
     
     if ( $updates->isa('Telegram::UpdatesTooLong') ) {
-                $self->invoke( Telegram::Updates::GetDifference->new( 
-                    date => $self->{session}{update_state}{date},
-                    pts => $self->{session}{update_state}{pts},
-                    qts => -1,
+        $self->invoke( Telegram::Updates::GetDifference->new( 
+                date => $self->{session}{update_state}{date},
+                pts => $self->{session}{update_state}{pts},
+                qts => -1,
             ), 
-            sub {
-                $self->_handle_upd_diff(@_);
-            });
+            sub { $self->_handle_upd_diff(@_) } 
+        );
     }
 }
 
