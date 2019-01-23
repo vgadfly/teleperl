@@ -215,7 +215,7 @@ sub _check_pts
         $self->{session}{update_state}{channel_pts}{$channel} :
         $self->{session}{update_state}{pts};
 
-    if ($local_pts + $count < $pts) {
+    if (defined $local_pts and $local_pts + $count < $pts) {
         if (defined $channel) {
             $self->invoke( Telegram::Updates::GetChannelDifference->new(
                 channel => $self->peer_from_id( $channel ),
@@ -538,6 +538,9 @@ sub _get_err_cb
                 undef $self->{_mt};
                 $self->start;
                 $self->update;
+            }
+            else {
+                $self->{error} = \%err;
             }
     }
 }
