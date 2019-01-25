@@ -67,7 +67,7 @@ package MTProto;
 
 use Data::Dumper;
 
-use fields qw( debug socket session on_message on_error noack 
+use fields qw( debug socket session on_message on_error noack last_error 
     _plain _pending _tcp_first _aeh _handle_plain _pq _queue);
 
 use AnyEvent;
@@ -166,16 +166,15 @@ sub gen_aes_key
 
 sub new
 {
+    my @args = qw(socket session debug noack on_message on_error);
     my ($class, %arg) = @_;
+    
     my $self = fields::new( ref $class || $class );
-    $self->{socket} = $arg{socket};
+    
     $self->{_tcp_first} = 1;
     $self->{_plain} = 0;
-    $self->{session} = $arg{session};
-    $self->{debug} = $arg{debug};
-    $self->{noack} = $arg{noack};
-    $self->{on_message} = $arg{on_message};
-    $self->{on_error} = $arg{on_error};
+    
+    @$self{@args} = @arg{@args};
 
     # init AE socket wrap
     $self->{_aeh} = AnyEvent::Handle->new(
@@ -227,6 +226,7 @@ sub _get_error_cb
         if ($self->{on_error}) {
             &{$self->{on_error}}( message => $msg );
         }
+        $self->{last_error} = {message => $msg};
         # ignore $fatal, destroy anyway
         $hdl->destroy;
     }
@@ -543,6 +543,7 @@ sub _handle_error
     else {
         warn "tcp transport error: $error";
     }
+    $self->{last_error} = { code => $error };
 }
 
 sub _handle_msg

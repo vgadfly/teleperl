@@ -48,11 +48,12 @@ use Telegram::Messages::SendMessage;
 use Telegram::InputPeer;
 
 use fields qw( _mt _dc _code_cb _app _proxy _timer _first _code_hash _rpc_cbs 
-    reconnect session on_update debug keepalive noupdate );
+    reconnect session on_update on_error debug keepalive noupdate error );
 
 # args: DC, proxy and stuff
 sub new
 {
+    my @args = qw( on_update on_error noupdate debug keepalive reconnect );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     
@@ -60,17 +61,14 @@ sub new
     $self->{_proxy} = $arg{proxy};
     $self->{_app} = $arg{app};
     $self->{_code_cb} = $arg{on_auth};
-    $self->{on_update} = $arg{on_update};
-    $self->{reconnect} = $arg{reconnect};
-    $self->{debug} = $arg{debug};
-    $self->{keepalive} = $arg{keepalive};
-    $self->{noupdate} = $arg{noupdate};
-    
+
+    @$self{@args} = @arg{@args};
+
+    # XXX: handle old session files
     my $session = $arg{session};
     $session->{mtproto} = {} unless exists $session->{mtproto};
     $self->{session} = $session;
     $self->{_first} = 1;
-
 
     return $self;
 }
@@ -108,7 +106,13 @@ sub start
             on_error => $self->_get_err_cb, on_message => $self->_get_msg_cb,
             debug => $self->{debug}
     );
-    
+
+    $self->run_updates unless $self->{noupdate};
+}
+
+sub run_updates {
+    my $self = shift;
+
     $self->{_timer} = AnyEvent->timer( after => 45, interval => 45, cb => $self->_get_timer_cb );
     
     unless (exists $self->{session}{update_state}) {
@@ -146,9 +150,9 @@ sub invoke
         # Wrapper conn
         my $conn = Telegram::InitConnection->new( 
                 api_id => $self->{_app}{api_id},
-                device_model => 'IBM PC/AT',
-                system_version => 'DOS 6.22',
-                app_version => '0.01',
+                device_model => $self->{_app}{device} // 'IBM PC/AT',
+                system_version => $self->{_app}{sys_ver} // 'DOS 6.22',
+                app_version => $self->{_app}{version} // '0.01',
                 system_lang_code => 'en',
                 lang_pack => '',
                 lang_code => 'en',
@@ -518,20 +522,33 @@ sub _handle_rpc_result
         delete $self->{_rpc_cbs}{$req_id};
     }
     if ($res->{result}->isa('MTProto::RpcError')) {
-        # XXX: on_error
-        &{$self->{on_update}}( $res->{result} ) if defined $self->{on_update};
+        $self->_handle_rpc_error($res->{result});
     }
 }
 
-# XXX: not called
+sub _handle_rpc_error
+{
+    my ($self, $err) = @_;
+
+    &{$self->{on_error}} if defined $self->{on_error};
+    $self->{error} = $err;
+
+    if ($err->{error_message} eq 'USER_DEACTIVATED') {
+        $self->{_timer} = undef;
+    }
+    if ($err->{error_message} eq 'AUTH_KEY_UNREGISTERED') {
+        $self->{_timer} = undef;
+    }
+}
+
 sub _get_err_cb
 {
     my $self = shift;
     return sub {
             my %err = @_;
             # TODO: log
-            print "Error: $err{message}" if ($err{message});
-            print "Error: $err{code}" if ($err{code});
+            warn "Error: $err{message}" if ($err{message});
+            warn "Error: $err{code}" if ($err{code});
 
             if ($self->{reconnect}) {
                 print "reconnecting" if $self->{debug};
@@ -540,7 +557,11 @@ sub _get_err_cb
                 $self->update;
             }
             else {
-                $self->{error} = \%err;
+                my $e = {
+                    error_message => $err{message},
+                    error_code => $err{code}
+                };
+                $self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
             }
     }
 }
@@ -555,6 +576,10 @@ sub _get_msg_cb
         # RpcResults
         $self->_handle_rpc_result( $msg->{object} )
             if ( $msg->{object}->isa('MTProto::RpcResult') );
+
+        # RpcErrors
+        $self->_handle_rpc_error( $msg->{object} )
+            if ( $msg->{object}->isa('MTProto::RpcError') );
 
         # Updates
         $self->_handle_updates( $msg->{object} )
@@ -818,7 +843,7 @@ sub _get_timer_cb
         #        $self->_handle_upd_diff(@_);
         #    }) unless $self->{noupdate};
         #$self->invoke( Telegram::Updates::GetState->new ) unless $self->{noupdate};
-        $self->{_mt}->invoke( MTProto::Ping->new( ping_id => rand(65536) ) ) if $self->{keepalive};
+        $self->{_mt}->invoke( MTProto::Ping->new( ping_id => rand(2**31) ) ) if $self->{keepalive};
     }
 }
 
