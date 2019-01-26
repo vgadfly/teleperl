@@ -220,9 +220,10 @@ sub _check_pts
         $self->{session}{update_state}{pts};
 
     if (defined $local_pts and $local_pts + $count < $pts) {
+        $channel = $self->peer_from_id( $channel );
         if (defined $channel) {
             $self->invoke( Telegram::Updates::GetChannelDifference->new(
-                channel => $self->peer_from_id( $channel ),
+                channel => $channel,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
                 pts => $local_pts,
                 limit => 0
@@ -285,15 +286,16 @@ sub _handle_update
     #$self->_debug_print_update($upd);
     
     if ($upd->isa('Telegram::UpdateChannelTooLong')) {
+        my $channel = $self->peer_from_id( $upd->{channel_id} );
         $self->invoke(
             Telegram::Updates::GetChannelDifference->new(
-                channel => $self->peer_from_id( $upd->{channel_id} ),
+                channel => $channel,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
                 pts => $self->{session}{update_state}{channel_pts}{$upd->{channel_id}},
                 limit => 0
             ),
             sub { $self->_handle_channel_diff( $upd->{channel_id}, @_ ) }
-        );
+        ) if defined $channel;
         return;
     }
     
@@ -679,13 +681,14 @@ sub _cache_chats
     my ($self, @chats) = @_;
     
     for my $chat (@chats) {
+        next if $chat->isa('Telegram::ChannelForbidden');
         if (exists $self->{session}{chats}{$chat->{id}}) {
             # old regular chats don't have access_hash o_O
             if (exists $chat->{access_hash}) {
                 $self->{session}{chats}{$chat->{id}}{access_hash} = $chat->{access_hash};
                 $self->{session}{chats}{$chat->{id}}{username} = $chat->{username};
-                $self->{session}{chats}{$chat->{id}}{title} = $chat->{title};    
-            }
+                $self->{session}{chats}{$chat->{id}}{title} = $chat->{title};   
+            } 
             else {
                 $self->{session}{chats}{$chat->{id}}{title} = $chat->{title};
             }
