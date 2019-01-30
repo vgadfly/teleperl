@@ -220,10 +220,11 @@ sub _check_pts
         $self->{session}{update_state}{pts};
 
     if (defined $local_pts and $local_pts + $count < $pts) {
-        $channel = $self->peer_from_id( $channel );
-        if (defined $channel) {
+        say "local_pts=$local_pts, pts=$pts, count=$count, channel=$channel" if $self->{debug};
+        my $channel_peer = $self->peer_from_id( $channel );
+        if (defined $channel_peer) {
             $self->invoke( Telegram::Updates::GetChannelDifference->new(
-                channel => $channel,
+                channel => $channel_peer,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
                 pts => $local_pts,
                 limit => 0
@@ -431,6 +432,7 @@ sub _handle_channel_diff
         warn "don't now how to handle ChannelDifferenceTooLong";
         return;
     }
+    say "channel=$channel, new pts=$diff->{pts}" if $self->{debug};
     $self->{session}{update_state}{channel_pts}{$channel} = $diff->{pts};  
 
     $self->_cache_users(@{$diff->{users}});
