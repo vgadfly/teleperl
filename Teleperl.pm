@@ -151,12 +151,12 @@ sub report_update
         }
         $to = $to ? " in $to" : '';
 
-        $tg->invoke(Telegram::Messages::ForwardMessages->new(
-                id => [ $upd->{id} ],
-                from_peer => $ip,
-                to_peer => Telegram::InputPeerSelf->new,
-                random_id => [ int(rand(65536)) ]
-        )) if defined $ip;
+        #$tg->invoke(Telegram::Messages::ForwardMessages->new(
+        #        id => [ $upd->{id} ],
+        #        from_peer => $ip,
+        #        to_peer => Telegram::InputPeerSelf->new,
+        #        random_id => [ int(rand(65536)) ]
+        #)) if defined $ip;
 
         my @t = localtime;
         print "\r[", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), "] ";
@@ -232,6 +232,65 @@ use Data::Dumper;
 use Telegram::Messages::GetDialogs;
 use Telegram::InputPeer;
 
+sub handle_dialogs
+{
+    my ($tg, $count, $ds) = @_;
+
+    if ($ds->isa('Telegram::Messages::DialogsABC')) {
+        my %users;
+        my %chats;
+        my $ipeer;
+
+        for my $u (@{$ds->{users}}) {
+            $users{$u->{id}} = $u;
+        }
+        for my $c (@{$ds->{chats}}) {
+            $chats{$c->{id}} = $c;
+        }
+        for my $d (@{$ds->{dialogs}}) {
+            $count++;
+            my $peer = $d->{peer};
+            if ($peer->isa('Telegram::PeerUser')) {
+                my $user_id = $peer->{user_id};
+                $peer = $users{$user_id};
+                say "$peer->{first_name} ". ($peer->{username} // "");
+                $ipeer = Telegram::InputPeerUser->new(
+                    user_id => $user_id,
+                    access_hash => $peer->{access_hash}
+                );
+            }
+            if ($peer->isa('Telegram::PeerChannel')) {
+                my $chan_id = $peer->{channel_id};
+                $peer = $chats{$chan_id};
+                $ipeer = Telegram::InputPeerChannel->new(
+                    channel_id => $chan_id,
+                    access_hash => $peer->{access_hash}
+                );
+                say "#" , ($peer->{username} // "channel with no name o_O");
+            }
+            if ($peer->isa('Telegram::PeerChat')){
+                my $chat_id = $peer->{chat_id};
+                $peer = $chats{$chat_id};
+                $ipeer = Telegram::InputPeerChat->new(
+                    chat_id => $chat_id,
+                );
+            }
+        }
+        if ($ds->isa('Telegram::Messages::DialogsSlice')) {
+            $tg->invoke(
+                Telegram::Messages::GetDialogs->new(
+                    offset_id => $ds->{messages}[-1]{id},
+                    offset_date => $ds->{messages}[-1]{date},
+                    offset_peer => Telegram::InputPeerEmpty->new,
+                    #    offset_peer => $ipeer,
+                    limit => -1
+                ),
+                sub { handle_dialogs($tg, $count, @_) }
+            ) if ($count < $ds->{count});
+        }
+    }
+}
+
 sub run
 {
     my ($self, $opts, $offset, $limit) = @_;
@@ -244,7 +303,7 @@ sub run
             offset_peer => Telegram::InputPeerEmpty->new,
             limit => $limit // -1
         ),
-        sub {say Dumper @_}
+        sub { handle_dialogs($tg, 0, @_)}
     );
 }
 
