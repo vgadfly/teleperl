@@ -47,8 +47,10 @@ use Telegram::Messages::SendMessage;
 # input
 use Telegram::InputPeer;
 
-use fields qw( _mt _dc _code_cb _app _proxy _timer _first _code_hash _rpc_cbs 
-    reconnect session on_update on_error debug keepalive noupdate error );
+use fields qw( 
+    _mt _dc _code_cb _app _proxy _timer _first _code_hash _rpc_cbs _rpc _rpc_timer
+    reconnect session on_update on_error debug keepalive noupdate error
+);
 
 # args: DC, proxy and stuff
 sub new
@@ -169,6 +171,8 @@ sub invoke
 
     # store handler for this query result
     $self->{_rpc_cbs}{$req_id} = $res_cb if defined $res_cb;
+    # store query
+    $self->{_rpc}{$req_id} = $query;
     return $req_id;
 }
 
@@ -520,19 +524,24 @@ sub _handle_rpc_result
     my ($self, $res) = @_;
 
     my $req_id = $res->{req_msg_id};
-    say "Got result for $req_id" if $self->{debug};
+    say "Got result for $req_id"; # if $self->{debug};
+    say ref $res->{result};
+    # XXX: on_error
     if (defined $self->{_rpc_cbs}{$req_id}) {
         &{$self->{_rpc_cbs}{$req_id}}( $res->{result} );
-        delete $self->{_rpc_cbs}{$req_id};
     }
     if ($res->{result}->isa('MTProto::RpcError')) {
-        $self->_handle_rpc_error($res->{result});
+        $self->_handle_rpc_error($res->{result}, $req_id);
+    }
+    else {
+        delete $self->{_rpc}{$res->{req_msg_id}};
+        delete $self->{_rpc_cbs}{$req_id};
     }
 }
 
 sub _handle_rpc_error
 {
-    my ($self, $err) = @_;
+    my ($self, $err, $req_id) = @_;
 
     &{$self->{on_error}} if defined $self->{on_error};
     $self->{error} = $err;
@@ -542,6 +551,21 @@ sub _handle_rpc_error
     }
     if ($err->{error_message} eq 'AUTH_KEY_UNREGISTERED') {
         $self->{_timer} = undef;
+    }
+    if ($err->{error_message} =~ /^FLOOD_WAIT_/) {
+        my $to = $err->{error_message};
+        $to =~ s/FLOOD_WAIT_//;
+        # XXX
+        say "chill for $to sec";
+        $self->{_rpc_timer}{$req_id} = AE::timer($to, 0, sub {
+			say "resend $req_id";
+                my $q = $self->{_rpc}{$req_id};
+		my $cb = $self->{_rpc_cbs}{$req_id}; 
+		say ref $q;
+                $self->invoke( $q, $cb);
+                delete $self->{_rpc_timer}{$req_id};
+		delete $self->{_rpc_cbs}{$req_id}; 
+        });
     }
 }
 
@@ -575,6 +599,7 @@ sub _get_msg_cb
     my $self = shift;
     return sub {
         my $msg = shift;
+	say ref $msg;
         say Dumper $msg->{object} if $self->{debug};
 
         # RpcResults
