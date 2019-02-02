@@ -5,7 +5,7 @@ use 5.012;
 use warnings;
 use strict;
 
-use Carp qw/croak/;
+use Carp qw/croak confess/;
 use Scalar::Util qw/reftype/;
 
 use Crypt::OpenSSL::Bignum;
@@ -59,7 +59,7 @@ sub pack_long
 sub unpack_long
 {
     my $stream = shift;
-    croak "bad stream" unless reftype($stream) eq 'ARRAY';
+    confess "bad stream" unless reftype($stream) eq 'ARRAY';
 
     my $lw = shift @$stream;
     my $hw = shift @$stream;
@@ -146,6 +146,24 @@ sub unpack_int256
     return Crypt::OpenSSL::Bignum->new_from_bin( pack( "(a4)*", @int256 ) );
 }
 
+sub pack_double
+{
+    local $_;
+    $_ = pack "d", $_[0];
+
+    unpack "(a4)*";
+}
+
+sub unpack_double
+{
+    my $stream = shift;
+    confess "bad stream" unless reftype($stream) eq 'ARRAY';
+
+    my $lw = shift @$stream;
+    my $hw = shift @$stream;
+    unpack "d", pack ("(a4)*", $lw, $hw);
+}
+
 sub unpack_obj
 {
     use MTProto::ObjTable;
@@ -157,7 +175,7 @@ sub unpack_obj
     
     my $unpacked = $stream;
     my $hash = unpack( "L<", shift @$stream );
-    croak "unexpected stream end" unless defined $hash;
+    confess "unexpected stream end" unless defined $hash;
     
     # Container msg, don't bother
     return undef if $hash == 0x73f1f8dc;
