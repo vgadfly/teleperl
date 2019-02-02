@@ -225,8 +225,8 @@ sub _check_pts
 
     if (defined $local_pts and $local_pts + $count < $pts) {
         say "local_pts=$local_pts, pts=$pts, count=$count, channel=$channel" if $self->{debug};
-        my $channel_peer = $self->peer_from_id( $channel );
-        if (defined $channel_peer) {
+        if (defined $channel) {
+            my $channel_peer = $self->peer_from_id( $channel );
             $self->invoke( Telegram::Updates::GetChannelDifference->new(
                 channel => $channel_peer,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
@@ -234,7 +234,7 @@ sub _check_pts
                 limit => 0
             ),
             sub { $self->_handle_channel_diff( $channel, @_ ) }
-            );
+            ) if defined $channel_peer;
         }
         else {
             $self->invoke( Telegram::Updates::GetDifference->new( 
@@ -309,10 +309,10 @@ sub _handle_update
         $upd->isa('Telegram::UpdateNewChannelMessage') or
         $upd->isa('Telegram::UpdateEditChannelMessage')
     ) {
-        $pts_good = $self->_check_pts( 
-            $upd->{pts}, $upd->{pts_count}, 
-            $upd->{message}{to_id}{channel_id}
-        );
+        my $chan = exists $upd->{message}{to_id} ? $upd->{message}{to_id}{channel_id} : undef;
+        say Dumper $upd unless defined $chan;
+        $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count}, $chan
+        ) if defined $chan;
     }
     if (
         $upd->isa('Telegram::UpdateDeleteChannelMessages') or 
@@ -812,7 +812,7 @@ sub peer
 sub peer_from_id
 {
     my ($self, $id) = @_;
-    croak unless defined $id;
+    croak "peer_from_id: undefined id" unless defined $id;
 
     my $users = $self->{session}{users};
     my $chats = $self->{session}{chats};
