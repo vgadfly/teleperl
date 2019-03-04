@@ -12,8 +12,12 @@ Pure perl mtproto/telergam client
 - Crypt::OpenSSL::AES
 - Parse::Yapp
 - Math::Prime::Util
-- Term::Readline::Gnu
+
+For CLI application:
+- Term::ReadLine::Gnu
 - Getopt::Long::Descriptive
+- Class::Inspector
+- Exception::Class
 
 ## PREPARE
 - generate parser using yapp: `yapp -m TL -s tl.yp`
