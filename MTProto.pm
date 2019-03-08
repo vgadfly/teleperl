@@ -67,8 +67,8 @@ package MTProto;
 
 use Data::Dumper;
 
-use fields qw( debug socket session on_message on_error noack last_error 
-    _plain _pending _tcp_first _aeh _handle_plain _pq _queue);
+use fields qw( debug session on_message on_error noack last_error 
+    _lock _plain _pending _tcp_first _aeh _handle_plain _pq _queue);
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -166,22 +166,23 @@ sub gen_aes_key
 
 sub new
 {
-    my @args = qw(socket session debug noack on_message on_error);
+    my @args = qw(session debug noack on_message on_error);
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
     
     $self->{_tcp_first} = 1;
     $self->{_plain} = 0;
+    $self->{_lock} = 0;
     
     @$self{@args} = @arg{@args};
 
     # init AE socket wrap
-    $self->{_aeh} = AnyEvent::Handle->new(
-        fh => $self->{socket},
-        on_read => $self->_get_read_cb(),
-        on_error => $self->_get_error_cb()
-    );
+    my $aeh = $arg{socket};
+    $aeh->on_read( $self->_get_read_cb );
+    $aeh->on_error( $self->_get_error_cb );
+    $aeh->on_drain( $self->_get_write_cb );
+    $self->{_aeh} = $aeh;
     
     # generate new auth_key
     $self->start_session unless defined $self->{session}{auth_key};
@@ -229,6 +230,15 @@ sub _get_error_cb
         $self->{last_error} = {message => $msg};
         # ignore $fatal, destroy anyway
         $hdl->destroy;
+    }
+}
+
+sub _get_write_cb
+{
+    my $self = shift;
+    return sub {
+        $self->{_lock} = 0;
+        $self->_dequeue;
     }
 }
 
@@ -444,7 +454,7 @@ sub _phase_three
     $self->{_plain} = 0;
     delete $self->{_pq};
     # process message queue
-    $self->unqueue;
+    $self->_dequeue;
 }
 
 ## send unencrypted message
@@ -464,41 +474,65 @@ sub _send_plain
     );
 }
 
-sub queue
+sub _enqueue
 {
     my ($self, $in_msg) = @_;
-    print "session not ready, queueing\n" if $self->{debug};
     push @{$self->{_queue}}, $in_msg;
 }
 
-sub unqueue
+sub _dequeue
 {
     my $self = shift;
     local $_;
 
+    # don't do anything if session is not yet espablished
+    return unless $self->{session}{auth_key_id};
+
+    $self->{_lock} = 0;
+
     $self->_real_send($_) while ($_ = shift @{$self->{_queue}});
 }
 
-## send encrypted message
+## send encrypted message(s)
+##
+## if send buffer is empty -- writes staight to socket
+## else -- pushes to internal queue, which is then processed when socket 
+## becomes ready
+##
+## multiple messages can be packed together
+##
 sub send
 {
-    my ($self, $msg) = @_;
+    my ($self, @msg) = @_;
+    local $_;
+
+    print "sending ".ref($_)." \n" for @msg;
     
+    # XXX: just use lock in new
     # check if session is ready
     unless ($self->{session}{session_id} and $self->{session}{auth_key_id}) {
-        $self->queue($msg);
+        print "session not ready, queueing\n" if $self->{debug};
+        $self->_enqueue($_) for @msg;
         return;
     }
-    _real_send(@_);
+    if ( $self->{_lock} ) {
+        $self->_enqueue($_) for @msg;
+    }
+    else {
+        # XXX: pack multiple messages together
+        $self->_real_send($_) for @msg;
+    }
 }
 
 sub _real_send
 {
     my ($self, $msg) = @_;
     
+    $self->{_lock} = 1;
+
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
-        $self->{socket}->send( pack( "L", 0xeeeeeeee ), 0 );
+        $self->{_aeh}->push_write( pack( "L", 0xeeeeeeee ) );
         $self->{_tcp_first} = 0;
     }
     croak "not MTProto::Message" unless $msg->isa('MTProto::Message');

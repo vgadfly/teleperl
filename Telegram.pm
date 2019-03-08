@@ -11,7 +11,8 @@ use Data::Dumper;
 use Carp;
 
 use IO::Socket;
-use Net::SOCKS;
+use IO::Socket::Socks;
+#use IO::Socket::Socks::Wrapper;
 
 use AnyEvent;
 
@@ -47,10 +48,8 @@ use Telegram::Messages::SendMessage;
 # input
 use Telegram::InputPeer;
 
-use fields qw( 
-    _mt _dc _code_cb _app _proxy _timer _first _code_hash _rpc_cbs _rpc _rpc_timer
-    reconnect session on_update on_error debug keepalive noupdate error
-);
+use fields qw( _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock
+    reconnect session on_update on_error debug keepalive noupdate error );
 
 # args: DC, proxy and stuff
 sub new
@@ -71,40 +70,42 @@ sub new
     $session->{mtproto} = {} unless exists $session->{mtproto};
     $self->{session} = $session;
     $self->{_first} = 1;
+    $self->{_lock} = 0;
 
     return $self;
 }
 
 # connect, start session
+# XXX: asyncronous connect
 sub start
 {
     my $self = shift;
+    my $aeh;
 
-    my $sock;
     if (defined $self->{_proxy}) {
-        my $proxy = new Net::SOCKS( 
-            socks_addr => $self->{_proxy}{addr},
-            socks_port => $self->{_proxy}{port}, 
-            user_id => $self->{_proxy}{user},
-            user_password => $self->{_proxy}{pass}, 
-            protocol_version => 5,
+        say "using proxy ", Dumper [ map{ $self->{_proxy}{$_} } qw/addr port/ ];
+        $aeh = AnyEvent::Handle->new(
+            connect => [ map{ $self->{_proxy}{$_} } qw/addr port/ ],
+            on_connect => sub {
+                my $sock = IO::Socket::Socks->start_SOCKS($aeh->fd, 
+                    ConnectAddr => $self->{_dc}{addr}, 
+                    ConnectPort => $self->{_dc}{port},
+                    Username => $self->{_proxy}{user},
+                    Password => $self->{_proxy}{pass}
+                );
+            },
+            on_connect_error => sub { die }
         );
-
-        # XXX: don't die
-        $sock = $proxy->connect( 
-            peer_addr => $self->{_dc}{addr}, 
-            peer_port => $self->{_dc}{port} 
-        ) or die;
     }
     else {
-        $sock = IO::Socket::INET->new(
-            PeerAddr => $self->{_dc}{addr}, 
-            PeerPort => $self->{_dc}{port},
-            Proto => 'tcp'
-        ) or die;
+        say "not using proxy: ", Dumper [ map{ $self->{_dc}{$_}} qw/addr port/ ];
+        $aeh = AnyEvent::Handle->new( 
+            connect => [ map{ $self->{_dc}{$_}} qw/addr port/ ],
+            on_connect_error => sub { die "Connection error" }
+        );
     }
     
-    $self->{_mt} = MTProto->new( socket => $sock, session => $self->{session}{mtproto},
+    $self->{_mt} = MTProto->new( socket => $aeh, session => $self->{session}{mtproto},
             on_error => $self->_get_err_cb, on_message => $self->_get_msg_cb,
             debug => $self->{debug}
     );
@@ -160,19 +161,29 @@ sub invoke
                 lang_code => 'en',
                 query => $query
         );
-
-        $req_id = $self->{_mt}->invoke( Telegram::InvokeWithLayer->new( layer => 76, query => $conn ) );
+        my $wrapper = Telegram::InvokeWithLayer->new( layer => 76, query => $conn ); 
+        
+        if ($self->{_lock}) {
+            $self->_enqueue( $wrapper, $res_cb );
+        }
+        else {
+            $req_id = $self->{_mt}->invoke( $wrapper );
+        }
 
         $self->{_first} = 0;
     }
     else {
+        if ($self->{_lock}) {
+            $self->_enqueue( $query, $res_cb );
+        }
+        else {
+            $req_id = $self->{_mt}->invoke( $query );
+        }
         $req_id = $self->{_mt}->invoke( $query );
     }
 
     # store handler for this query result
-    $self->{_rpc_cbs}{$req_id} = $res_cb if defined $res_cb;
-    # store query
-    $self->{_rpc}{$req_id} = $query;
+    $self->{_req}{cbs}{$req_id} = $res_cb if defined $res_cb;
     return $req_id;
 }
 
@@ -523,12 +534,12 @@ sub _handle_rpc_result
 {
     my ($self, $res) = @_;
 
+    # XXX: handle FLOOD_WAIT here
     my $req_id = $res->{req_msg_id};
-    say "Got result for $req_id"; # if $self->{debug};
-    say ref $res->{result};
-    # XXX: on_error
-    if (defined $self->{_rpc_cbs}{$req_id}) {
-        &{$self->{_rpc_cbs}{$req_id}}( $res->{result} );
+    say "Got result for $req_id" if $self->{debug};
+    if (defined $self->{_req}{cbs}{$req_id}) {
+        &{$self->{_req}{cbs}{$req_id}}( $res->{result} );
+        delete $self->{_req}{cbs}{$req_id};
     }
     if ($res->{result}->isa('MTProto::RpcError')) {
         $self->_handle_rpc_error($res->{result}, $req_id);

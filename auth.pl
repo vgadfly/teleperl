@@ -36,15 +36,21 @@ use Telegram::Auth::SentCode;
 use Telegram::Auth::SignIn;
 
 # new connection
-my $proxy = new Net::SOCKS( socks_addr => $conf->{proxy}{addr},
-    socks_port => $conf->{proxy}{port}, 
-    user_id => $conf->{proxy}{user},
-    user_password => $conf->{proxy}{pass}, 
-    protocol_version => 5,
-);
+#my $proxy = new Net::SOCKS( socks_addr => $conf->{proxy}{addr},
+#    socks_port => $conf->{proxy}{port}, 
+#    user_id => $conf->{proxy}{user},
+#    user_password => $conf->{proxy}{pass}, 
+#    protocol_version => 5,
+#);
 
-my $sock = $proxy->connect( peer_addr => $conf->{dc}{addr}, peer_port => $conf->{dc}{port} ) or die;
+#my $sock = $proxy->connect( peer_addr => $conf->{dc}{addr}, peer_port => $conf->{dc}{port} ) or die;
     
+my $sock = IO::Socket::INET->new(
+    PeerAddr => $conf->{dc}{addr}, 
+    PeerPort => $conf->{dc}{port},
+    Proto => 'tcp'
+) or die;
+
 # this creates new MTProto session
 my $mt = MTProto->new( socket => $sock, session => undef, debug => 1 );
 
@@ -92,6 +98,9 @@ $mt->{on_message} = sub {
         }
         elsif ($res->isa('Telegram::Auth::Authorization') ){
             say "auth ok";
+        }
+        else {
+            say Dumper $msg->{object};
         }
     }
     else {
