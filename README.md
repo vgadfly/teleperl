@@ -5,7 +5,7 @@ Pure perl mtproto/telergam client
 - Modern::Perl
 - Config::Tiny
 - AnyEvent
-- Net::SOCKS
+- IO::Socket::Socks
 - Crypt::OpenSSL::Bignum
 - Crypt::OpenSSL::RSA
 - Crypt::OpenSSL::Random
