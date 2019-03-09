@@ -408,6 +408,54 @@ sub validate
     die "user/chat must be specified" unless defined $args[0];
 }
 
+sub handle_history
+{
+    my ($self, $peer, $messages, $ptop) = @_;
+    my $tg = $self->cache->get('tg');
+    
+    my $top = 0;
+    $tg->_cache_users(@{$messages->{users}}) ;
+    for my $upd (@{$messages->{messages}}) {
+        $top = $upd->{id};
+        if ($upd->isa('Telegram::Message')) {
+            my $name = defined $upd->{from_id} ? $tg->peer_name($upd->{from_id}) : '';
+            my $to = $upd->{to_id};
+            my $ip = defined $upd->{from_id} ? $tg->peer_from_id($upd->{from_id}) : undef;
+            if ($to) {
+                if ($to->isa('Telegram::PeerChannel')) {
+                    $to = $to->{channel_id};
+                }
+                if ($to->isa('Telegram::PeerChat')) {
+                    $to = $to->{chat_id};
+                }
+                $ip = $tg->peer_from_id($to);
+                $to = $tg->peer_name($to);
+            }
+            $to = $to ? " in $to" : '';
+
+            my @t = localtime;
+            print "\r[", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), "] ";
+            say "$name$to: $upd->{message}";
+            #say Dumper $upd;
+        }
+    }
+    if ($ptop == 0 or $top < $ptop) {
+        $tg->invoke( Telegram::Messages::GetHistory->new(
+                peer => $peer,
+                offset_id => $top,
+                offset_date => 0,
+                add_offset => 0,
+                limit => 10,
+                max_id => 0,
+                min_id => 0,
+                hash => 0
+            ), sub {
+                $self->handle_history($peer, $_[0], $top) if $_[0]->isa('Telegram::Messages::MessagesABC');
+            } );
+    }
+                    
+}
+
 sub run
 {
     my ($self, $opts, $peer, @msg) = @_;
@@ -430,8 +478,12 @@ sub run
             add_offset => 0,
             limit => 10,
             max_id => 0,
-            min_id => 0
-        ), sub {say Dumper @_} );
+            min_id => 0,
+            hash => 0
+        ), sub {
+            $self->handle_history($peer, $_[0], 0) if $_[0]->isa('Telegram::Messages::MessagesABC');
+
+        } );
 }
 
 package Teleperl::Command::Read;
