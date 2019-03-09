@@ -48,8 +48,9 @@ use Telegram::Messages::SendMessage;
 # input
 use Telegram::InputPeer;
 
-use fields qw( _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock
-    reconnect session on_update on_error debug keepalive noupdate error );
+use fields qw(
+    _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
+    _queue reconnect session on_update on_error debug keepalive noupdate error );
 
 # args: DC, proxy and stuff
 sub new
@@ -147,6 +148,7 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
+    say ref $query;
     say Dumper $query if $self->{debug};
     if ($self->{_first}) {
         
@@ -182,9 +184,24 @@ sub invoke
         $req_id = $self->{_mt}->invoke( $query );
     }
 
+    $self->{_req}{$req_id}{query} = $query;
     # store handler for this query result
-    $self->{_req}{cbs}{$req_id} = $res_cb if defined $res_cb;
+    $self->{_req}{$req_id}{cb} = $res_cb if defined $res_cb;
     return $req_id;
+}
+
+sub _enqueue
+{
+    my ($self, $query, $cb) = @_;
+    push @{$self->{_queue}}, [$query, $cb];
+}
+
+sub _dequeue
+{
+    my $self = shift;
+    local $_;
+    $self->invoke($_->[0], $_->[1]) while ( $_ = shift @{$self->{_queue}} );
+    $self->{_lock} = 0;
 }
 
 sub auth
@@ -444,7 +461,25 @@ sub _handle_channel_diff
     #say ref $diff;
   
     if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
-        warn "don't now how to handle ChannelDifferenceTooLong";
+        warn "ChannelDifferenceTooLong";
+        $self->_cache_users(@{$diff->{users}});
+        $self->_cache_chats(@{$diff->{chats}});
+        $self->{session}{update_state}{channel_pts}{$channel} = $diff->{pts};  
+        say "old pts=",$self->{session}{update_state}{channel_pts}{$channel};
+        say "new pts=$diff->{pts}";
+        for my $msg (@{$diff->{messages}}) {
+           #say ref $msg;
+           &{$self->{on_update}}($msg) if $self->{on_update};
+        }
+
+        #$self->invoke( Telegram::Updates::GetChannelDifference->new(
+        #    channel => $channel_peer,
+        #    filter => Telegram::ChannelMessagesFilterEmpty->new,
+        #    pts => $local_pts,
+        #    limit => 0
+        #),
+        #sub { $self->_handle_channel_diff( $channel, @_ ) }
+        #) if defined $channel_peer;
         return;
     }
     say "channel=$channel, new pts=$diff->{pts}" if $self->{debug};
@@ -537,16 +572,12 @@ sub _handle_rpc_result
     # XXX: handle FLOOD_WAIT here
     my $req_id = $res->{req_msg_id};
     say "Got result for $req_id" if $self->{debug};
-    if (defined $self->{_req}{cbs}{$req_id}) {
-        &{$self->{_req}{cbs}{$req_id}}( $res->{result} );
-        delete $self->{_req}{cbs}{$req_id};
+    if (defined $self->{_req}{$req_id}{cb}) {
+        &{$self->{_req}{$req_id}{cb}}( $res->{result} );
     }
+    delete $self->{_req}{$req_id};
     if ($res->{result}->isa('MTProto::RpcError')) {
         $self->_handle_rpc_error($res->{result}, $req_id);
-    }
-    else {
-        delete $self->{_rpc}{$res->{req_msg_id}};
-        delete $self->{_rpc_cbs}{$req_id};
     }
 }
 
@@ -554,7 +585,7 @@ sub _handle_rpc_error
 {
     my ($self, $err, $req_id) = @_;
 
-    &{$self->{on_error}} if defined $self->{on_error};
+    &{$self->{on_error}}($err) if defined $self->{on_error};
     $self->{error} = $err;
 
     if ($err->{error_message} eq 'USER_DEACTIVATED') {
@@ -566,16 +597,19 @@ sub _handle_rpc_error
     if ($err->{error_message} =~ /^FLOOD_WAIT_/) {
         my $to = $err->{error_message};
         $to =~ s/FLOOD_WAIT_//;
-        # XXX
+        
         say "chill for $to sec";
-        $self->{_rpc_timer}{$req_id} = AE::timer($to, 0, sub {
+        $self->{_lock} = 1;
+        $self->{_flood_timer} = AE::timer($to, 0, sub {
 			say "resend $req_id";
-                my $q = $self->{_rpc}{$req_id};
-		my $cb = $self->{_rpc_cbs}{$req_id}; 
-		say ref $q;
-                $self->invoke( $q, $cb);
-                delete $self->{_rpc_timer}{$req_id};
-		delete $self->{_rpc_cbs}{$req_id}; 
+            $self->{_lock} = 0;
+
+            my $q = $self->{_req}{$req_id}{query};
+		    my $cb = $self->{_req}{$req_id}{cb}; 
+		    say ref $q;
+            # requeue the query
+            $self->invoke( $q, $cb);
+            delete $self->{_req}{$req_id}; 
         });
     }
 }
