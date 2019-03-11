@@ -630,13 +630,13 @@ sub _run_cmd_processing_loop {
 sub get_prompt {
     my ($app) = @_;
 
-    return ($app->{_readline_prompt}, $app->{_readline_preput});
+    return ( $app->cache->get('_readline_prompt'), $app->{_readline_preput});
 }
 
 sub set_prompt {
     my ($app, $prompt, $preput) = @_;
 
-    $app->{_readline_prompt} = defined $prompt ? $prompt : '> ';
+     $app->cache->set('_readline_prompt' => defined $prompt ? $prompt : '> ');
     $app->{_readline_preput} = $preput;
 }
 
@@ -676,7 +676,7 @@ sub _init_interactive {
     $term->MinLine(0);
 
     # set default variables for later calls, is user didn't this already
-    $app->set_prompt() unless defined $app->{_readline_prompt};
+    $app->set_prompt() unless defined $app->cache->get('_readline_prompt');
 
     # allow deferred setting of ornaments from app's init() when readline is
     # not yet available
@@ -706,7 +706,7 @@ sub read_cmd {
 
     # Prompt for the name of a command and read input from STDIN.
     # Store the individual tokens that are read in @ARGV.
-    my $command_request = $term->readline($app->{_readline_prompt}, $app->{_readline_preput});
+    my $command_request = $term->readline( $app->cache->get('_readline_prompt'), $app->{_readline_preput});
     if(! defined $command_request ) {
         # Interpret CTRL-D (EOF) as a quit signal...
         @ARGV = $app->quit_signals();
