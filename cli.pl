@@ -1,4 +1,4 @@
-#!/usr/bib/env perl5
+#!/usr/bin/env perl5
 
 use Modern::Perl;
 
