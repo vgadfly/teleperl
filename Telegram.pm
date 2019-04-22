@@ -84,19 +84,17 @@ sub start
     my $aeh;
 
     if (defined $self->{_proxy}) {
+        # XXX: blocking connect
         say "using proxy ", Dumper [ map{ $self->{_proxy}{$_} } qw/addr port/ ];
-        $aeh = AnyEvent::Handle->new(
-            connect => [ map{ $self->{_proxy}{$_} } qw/addr port/ ],
-            on_connect => sub {
-                my $sock = IO::Socket::Socks->start_SOCKS($aeh->fd, 
-                    ConnectAddr => $self->{_dc}{addr}, 
-                    ConnectPort => $self->{_dc}{port},
-                    Username => $self->{_proxy}{user},
-                    Password => $self->{_proxy}{pass}
-                );
-            },
-            on_connect_error => sub { die }
-        );
+        my $sock = IO::Socket::Socks->new(
+            ProxyAddr => $self->{_proxy}{addr},
+            ProxyPort => $self->{_proxy}{port},
+            ConnectAddr => $self->{_dc}{addr}, 
+            ConnectPort => $self->{_dc}{port},
+            Username => $self->{_proxy}{user},
+            Password => $self->{_proxy}{pass}
+        ) or die "Proxy connection error";
+        $aeh = AnyEvent::Handle->new( fh => $sock );
     }
     else {
         say "not using proxy: ", Dumper [ map{ $self->{_dc}{$_}} qw/addr port/ ];
