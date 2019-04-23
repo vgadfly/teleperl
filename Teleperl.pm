@@ -201,11 +201,14 @@ sub validate
 
 sub run
 {
-    my ($self, $opts, $peer, @msg) = @_;
+    my ($self, $opts, $idpeer, @msg) = @_;
 
     my $tg = $self->cache->get('tg');
 
-    $peer = $tg->name_to_id($peer);
+    my $peer = $tg->name_to_id($idpeer);
+    unless (defined $peer) {
+        $peer = $idpeer if $idpeer =~ /^\d+$/;
+    }
 
     return "unknown user/chat" unless defined $peer;
 

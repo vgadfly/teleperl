@@ -710,10 +710,19 @@ sub send_text_message
         );
     }
     if (exists $chats->{$arg{to}}) {
-        $peer = Telegram::InputPeerChannel->new( 
-            channel_id => $arg{to}, 
-            access_hash => $chats->{$arg{to}}{access_hash}
-        );
+        if (exists $chats->{$arg{to}}{access_hash}) {
+            # channel
+            $peer = Telegram::InputPeerChannel->new( 
+                channel_id => $arg{to}, 
+                access_hash => $chats->{$arg{to}}{access_hash}
+            );
+        }
+        else {
+            # old chats with no access hash
+            $peer = Telegram::InputPeerChat->new( 
+                chat_id => $arg{to}, 
+            );
+        } 
     }
 
     if ($arg{to}->isa('Telegram::PeerChannel')) {
