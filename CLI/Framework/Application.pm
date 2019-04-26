@@ -654,8 +654,100 @@ sub ornaments {
     }
 }
 
+my $_has_trp = 0; # workarounds if Term::ReadLine::Perl instead of ::Gnu
+our $rl_getc_orig;
+
+sub event_loop {
+    my $app = shift;
+
+    my $term = $app->{_readline};
+
+    unless (defined $term) {
+        $app->{_readline_event_loop} = [ @_ ];
+        return undef;
+    }
+
+    # XXX AnyEvent on Windows tries to select on console handle
+    # and receives WSAENOTSOCK which means *EVERY* I/O watchers
+    # became broken so you get e.g. connection timeout when it
+    # in fact works because now only timers are left working...
+    #
+    # So we implement here a huge kludge with polling
+    # to make Term::ReadLine::Perl work there.
+    my $crutch = $_has_trp && $^O eq 'MSWin32';
+    $rl_getc_orig = $readline::rl_getc if $crutch;
+    my $freq = defined $_[0] && !ref $_[0] ? $_[0] : 0;
+    return $term->event_loop(
+        @_ > 1 || @_ == 1 && !defined $_[0] && !$freq ? @_ : (
+            sub {
+                my $data = shift;
+                $data->[0] = AE::cv(); # XXX leak?
+                $data->[0]->recv();
+
+                # here we will return to readline's getc() or like
+                if ($crutch) {
+                    # now we must emulate ungetc() for TRP...
+                    #push @readline::Pending, pop @$data; # FIXME
+                    $readline::_clif_trp_key = pop @$data;
+                }
+            }, sub {
+                my $fh = shift;
+
+                # The data for AE are: the file event watcher (which
+                # cannot be garbage collected until we're done) and
+                # a placeholder for the condvar we're sharing between
+                # the AE::io callback created here and the wait
+                # callback above.
+                my $data = [];
+                if (not $crutch) {
+                    $data->[1] = AE::io($fh, 0, sub { $data->[0]->send() });
+                }
+                else {
+                    require Term::ReadKey or die "not ActivePerl?";
+                    $data->[2] = AnyEvent->timer(
+                        after => 0.2,
+                        interval => 1/$freq,
+                        cb => sub {
+                            $data->[3] = Term::ReadKey::ReadKey(-1, $fh);
+                            $data->[0]->send() if defined $data->[3];
+                        }
+                    );
+                    $readline::rl_getc = sub {
+                        $Term::ReadLine::Perl::term->Tk_loop
+                          if $Term::ReadLine::toloop && defined &Tk::DoOneEvent;
+                        $readline::_clif_trp_key // &$rl_getc_orig;
+                   };
+               }
+               $data;
+           }
+        )
+    );
+}
+
+sub with_readline_vars {
+    my ($app, $cb) = @_;
+
+    my $term = $app->{_readline};
+
+    if (defined $term) {
+        return $cb->(
+            ReadLine    => $term->ReadLine,
+            Attribs     => $term->Attribs,
+            Features    => $term->Features,
+            IN          => $term->IN,
+            OUT         => $term->OUT,
+        );
+    }
+    else {
+        $app->{_readline_initcb} = $cb;
+        return undef;
+    }
+}
+
 sub _init_interactive {
     my ($app) = @_;
+
+    return $app->{_readline} if $app->{_readline};
 
     require Text::ParseWords;
     require Term::ReadLine;
@@ -669,8 +761,14 @@ sub _init_interactive {
 
     # Arrange for command-line completion...
     my $attribs = $term->Attribs;
-    $attribs->{attempted_completion_function} = $app->_cmd_request_completions();
-    $attribs->{completer_quote_characters} = $attribs->{basic_quote_characters};
+    if ($term->ReadLine =~ /::Perl/) {
+        $_has_trp = 1;
+        $attribs->{completion_function} = $app->_cmd_request_completions();
+    }
+    else {
+        $attribs->{attempted_completion_function} = $app->_cmd_request_completions();
+        $attribs->{completer_quote_characters} = $attribs->{basic_quote_characters};
+    }
 
     # disable automatic history for asking passwords etc.
     $term->MinLine(0);
@@ -678,11 +776,22 @@ sub _init_interactive {
     # set default variables for later calls, is user didn't this already
     $app->set_prompt() unless defined $app->{_readline_prompt};
 
-    # allow deferred setting of ornaments from app's init() when readline is
-    # not yet available
+    # allow deferred setting of ornaments and event_loop from app's init()
+    # when readline is not yet available
     if (exists $app->{_readline_ornament}) {
         $term->ornaments($app->{_readline_ornament});
         delete $app->{_readline_ornament};
+    }
+
+    if (exists $app->{_readline_event_loop}) {
+        $app->event_loop(@{ $app->{_readline_event_loop} });
+        delete $app->{_readline_event_loop};
+    }
+
+    # deferred call of readline variable processing hook from app's init()
+    if (exists $app->{_readline_initcb}) {
+        $app->with_readline_vars($app->{_readline_initcb});
+        delete $app->{_readline_initcb};
     }
 
     # preload all needed subcommand trees for complex completion to work
@@ -726,7 +835,7 @@ sub _cmd_request_completions {
     my $term = $app->{_readline};
     my $attribs = $term->Attribs;
     return sub {
-        my ($text, $line, $start, $end) = @_;
+        my ($text, $line, $start, $end) = @_; # TRP will not set $end, avoid it
         my @matches;
 
         # optimize & workaround Text::ParseWords on unbalanced quotes
@@ -899,6 +1008,9 @@ sub _filter_matches {
 # lowest common denominator: prepend common prefix of the list of matches
 sub _put_lcd_of_matches {
     my ($text, @matches) = @_;
+
+    return @matches if $_has_trp;
+
     my $lcd = '';
 
     # short-circuit when only one variant
@@ -960,6 +1072,10 @@ sub ask_password {
     my $term = $app->{_readline};
     return undef unless $term;      # a caller error if non-inited
     my $attribs = $term->Attribs;
+
+    warn "WARNING!!! Term::ReadLine::Perl unsupported, your pass WILL BE VISIBLE!!!\n",
+    $retries = -1
+        if $_has_trp;
 
     do {
         # mask typed characters for password
@@ -1429,6 +1545,47 @@ C<$preput> is empty.
 A wrapper of the function with the same name from L<Term::ReadLine> to set
 formatting of the command line by using termcap data.
 
+=head2 event_loop()
+
+    $app->event_loop(sub { ... AE::cv(); ... }, sub { ... AE::io(...) ... });
+    $app->event_loop();     # install default handlers with AnyEvent
+    $app->event_loop(30);   # same + times per second to poll on Windows
+
+A wrapper of the function with the same name from L<Term::ReadLine> to set
+call-backs to wait for user input during L<read_cmd()/read_cmd()> method.
+The actual call (e.g. during L<init|/init( $options_hash )> hook) is deferred
+if ReadLine is not yet initialized.
+
+Additionally, if no arguments are provided and/or the only argument is
+positive integer number, then default callbacks are installed.  These are
+as in example in L<Term::ReadLine> for L<AnyEvent> but are modified to
+include workaround for L<Term::ReadLine::Perl> on Windows platform where
+L<AnyEvent> is broken (every I/O watcher stops to work if you add non-socket
+handles such STDIN).  In such case, the only integer argument tells how many
+times per second to poll the console; on normal platforms this is no-op and
+no polling happens.
+
+=head2 with_readline_vars( $sub )
+
+    $app->with_readline_vars(sub {  # in app's init()
+        my %params = @_;
+
+        $disable_password = 1 unless $params{ReadLine} =~ /Gnu/;
+
+        if ($params{Features}->{attribs}) {
+            $params{Attribs}->{basic_word_break_characters} =~ s/@//g;
+        }
+    });
+
+This method runs supplied user callback code with passing hash of variables
+from L<Term::ReadLine> "get" method calls of the same name, i.e. those which
+don't take arguments and just return values (with no side effects).  This
+allows to tweak ReadLine variables based on actual ReadLine implementation used
+or current application state, e.g. in L<pre_prompt|/pre_prompt()> hook.
+
+The actual call is deferred if ReadLine library is not yet initialized
+(e.g. during L<init|/init( $options_hash )> hook) but run immediately otherwise.
+
 =head2 read_cmd()
 
     $app->read_cmd();
@@ -1484,6 +1641,10 @@ all retries.
 If one wants to just ask password one time for checking, not setting purposes,
 then C<$retries> should be passed negative value and C<$reenter> argument
 will be ignored (won't be prompted again).
+
+B<WARNING!!!> This relies on feature of Term::ReadLine::Gnu, for
+Term::ReadLine::Perl a warning (visible password) will be displayed and
+there will be no retries regardless of C<$retries> value.
 
 =head1 SUBCLASS HOOKS
 
@@ -1699,7 +1860,7 @@ something more elaborate, such as exception objects).
 For interactive usage, L<Term::ReadLine> is used by default.  Depending on which
 readline libraries are available on your system, your interactive experience
 will vary (for example, systems with GNU readline can benefit from a command
-history buffer).
+history buffer and context-dependent command/options completion).
 
 =head1 DEPENDENCIES
 

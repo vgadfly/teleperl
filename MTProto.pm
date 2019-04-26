@@ -53,7 +53,7 @@ sub unpack
     my @stream = unpack( "(a4)*", $self->{data} );
     eval { $self->{object} = TL::Object::unpack_obj(\@stream); };
     my ($package, $filename, $line) = caller;
-    warn "$@ (called from $filename:$line)" if $@;
+    AE::log warn => "$@ (called from $filename:$line)" if $@;
 
     #print unpack "H*", $self->{data} unless (defined $self->{object});
     #print ref $self->{object} if (defined $self->{object});
@@ -247,7 +247,7 @@ sub start_session
 {
     my $self = shift;
 
-    print "starting new session\n" if $self->{debug};
+    AE::log debug => "starting new session\n" if $self->{debug};
 
     $self->{_plain} = 1;
     $self->{session}{seq} = 0;
@@ -283,7 +283,7 @@ sub _phase_one
     my $res_pq = TL::Object::unpack_obj( \@stream );
     die unless $res_pq->isa("MTProto::ResPQ");
 
-    print "got ResPQ\n" if $self->{debug};
+    AE::log debug => "got ResPQ\n" if $self->{debug};
 
     my $pq = unpack "Q>", $res_pq->{pq};
     my @pq = factor($pq);
@@ -348,7 +348,7 @@ sub _phase_two
     my $dh_params = TL::Object::unpack_obj( \@stream );
     die unless $dh_params->isa('MTProto::ServerDHParamsOk');
 
-    print "got ServerDHParams\n" if $self->{debug};
+    AE::log debug => "got ServerDHParams\n" if $self->{debug};
 
     my $tmp_key = sha1( $new_nonce->to_bin() . $server_nonce->to_bin ).
             substr( sha1( $server_nonce->to_bin() . $new_nonce->to_bin ), 0, 12 );
@@ -368,7 +368,7 @@ sub _phase_two
     my $dh_inner = TL::Object::unpack_obj( \@stream );
     die unless $dh_inner->isa('MTProto::ServerDHInnerData');
     
-    print "got ServerDHInnerData\n" if $self->{debug};
+    AE::log debug => "got ServerDHInnerData\n" if $self->{debug};
 
     die "bad nonce" unless $dh_inner->{nonce}->equals( $nonce );
     die "bad server_nonce" unless $dh_inner->{server_nonce}->equals( $server_nonce );
@@ -432,7 +432,7 @@ sub _phase_three
     my $result = TL::Object::unpack_obj( \@stream );
     die unless $result->isa('MTProto::DhGenOk');
 
-    print "DH OK\n" if $self->{debug};
+    AE::log debug => "DH OK\n" if $self->{debug};
 
     # check new_nonce_hash
     my $auth_key_aux_hash = substr(sha1($auth_key), 0, 8);
@@ -442,7 +442,7 @@ sub _phase_three
     $nnh = substr(sha1($nnh), -16);
     die "bad new_nonce_hash1" unless $result->{new_nonce_hash1}->to_bin eq $nnh;
 
-    print "session started\n" if $self->{debug};
+    AE::log debug => "session started\n" if $self->{debug};
 
     $self->{session}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
     $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
@@ -506,12 +506,12 @@ sub send
     my ($self, @msg) = @_;
     local $_;
 
-    print "sending ".ref($_)." \n" for @msg;
+    AE::log info => "sending ".ref($_)." \n" for @msg;
     
     # XXX: just use lock in new
     # check if session is ready
     unless ($self->{session}{session_id} and $self->{session}{auth_key_id}) {
-        print "session not ready, queueing\n" if $self->{debug};
+        AE::log debug => "session not ready, queueing\n" if $self->{debug};
         $self->_enqueue($_) for @msg;
         return;
     }
@@ -550,7 +550,7 @@ sub _real_send
     my $packet = $self->{session}{auth_key_id} . $msg_key . $enc_data;
 
     if ($self->{debug}) {
-        print "sending $msg->{seq}:$msg->{msg_id}, ".length($packet). " bytes encrypted\n";
+        AE::log debug => "sending $msg->{seq}:$msg->{msg_id}, ".length($packet). " bytes encrypted\n";
     }
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
 }
@@ -575,7 +575,7 @@ sub _handle_error
         &{$self->{on_error}}( code => $error );
     }
     else {
-        warn "tcp transport error: $error";
+        AE::log warn => "tcp transport error: $error";
     }
     $self->{last_error} = { code => $error };
 }
@@ -585,21 +585,20 @@ sub _handle_msg
     my ($self, $msg) = @_;
 
     if ($self->{debug}) {
-        print "handle_msg $msg->{seq},$msg->{msg_id}: ";
-        print ref $msg->{object};
-        print "\n";
+        AE::log debug => "handle_msg $msg->{seq},$msg->{msg_id}: ";
+        AE::log debug => ref $msg->{object};
     }
 
     # unpack msg containers
     my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
     if ($objid == 0x73f1f8dc) {
-        print "Container\n" if $self->{debug};
+        AE::log debug => "Container\n" if $self->{debug};
 
         my $data = $msg->{data};
         my $msg_count = unpack( "L<", substr($data, 4, 4) );
         my $pos = 8;
         
-        print "msg container of size $msg_count\n" if $self->{debug};
+        AE::log debug => "msg container of size $msg_count\n" if $self->{debug};
         while ( $msg_count && $pos < length($data) ) {
             my $sub_len = unpack( "L<", substr($data, $pos+12, 4) );
             my $sub_msg = MTProto::Message->unpack( substr($data, $pos) );
@@ -608,11 +607,11 @@ sub _handle_msg
             $pos += 16 + $sub_len;
             $msg_count--;
         }
-        warn "msg container ended prematuraly" if $msg_count;
+        AE::log warn => "msg container ended prematuraly" if $msg_count;
     }
     # gzip
     elsif ($objid == 0x3072cfa1) {
-        print "gzip\n" if $self->{debug};
+        AE::log debug => "gzip\n" if $self->{debug};
         
         my @stream = unpack "(a4)*", substr($msg->{data}, 4);
         my $zdata = TL::Object::unpack_string(\@stream);
@@ -645,7 +644,7 @@ sub _handle_msg
             # sesssion not in sync: destroy and make new
             my $ecode = $m->{object}{error_code};
             my $bad_msg = $m->{object}{bad_msg_id};
-            warn "error $ecode recvd for $bad_msg";
+            AE::log warn => "error $ecode recvd for $bad_msg";
             # no way to destroy current session defined
             #$self->invoke(MTProto::DestroySession->new( 
             #        session_id => unpack( "Q<", $self->{session}->{session_id} )
@@ -679,7 +678,7 @@ sub _handle_encrypted
     my ($self, $data) = @_;
     my @ret;
 
-    print "recvd ". length($data) ." bytes encrypted\n" if $self->{debug};
+    AE::log debug => "recvd ". length($data) ." bytes encrypted\n" if $self->{debug};
 
     if (length($data) == 4) {
         # handle error here
@@ -705,7 +704,7 @@ sub _ack
 {
     my ($self, @msg_ids) = @_;
     my ($package, $filename, $line) = caller;
-    print "ack ", join (",", @msg_ids), "\n" if $self->{debug};
+    AE::log debug => "ack ", join (",", @msg_ids), "\n" if $self->{debug};
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
     #$ack->{msg_ids} = \@msg_ids;
