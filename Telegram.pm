@@ -85,7 +85,7 @@ sub start
 
     if (defined $self->{_proxy}) {
         # XXX: blocking connect
-        say "using proxy ", Dumper [ map{ $self->{_proxy}{$_} } qw/addr port/ ];
+        AE::log info => "using proxy ", Dumper [ map{ $self->{_proxy}{$_} } qw/addr port/ ];
         my $sock = IO::Socket::Socks->new(
             ProxyAddr => $self->{_proxy}{addr},
             ProxyPort => $self->{_proxy}{port},
@@ -97,7 +97,7 @@ sub start
         $aeh = AnyEvent::Handle->new( fh => $sock );
     }
     else {
-        say "not using proxy: ", Dumper [ map{ $self->{_dc}{$_}} qw/addr port/ ];
+        AE::log info => "not using proxy: ", Dumper [ map{ $self->{_dc}{$_}} qw/addr port/ ];
         $aeh = AnyEvent::Handle->new( 
             connect => [ map{ $self->{_dc}{$_}} qw/addr port/ ],
             on_connect_error => sub { die "Connection error" }
@@ -146,8 +146,8 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
-    say ref $query;
-    say Dumper $query if $self->{debug};
+    AE::log info => ref $query;
+    AE::log debug => Dumper $query if $self->{debug};
     if ($self->{_first}) {
         
         # Wrapper conn
@@ -250,7 +250,7 @@ sub _check_pts
         $self->{session}{update_state}{pts};
 
     if (defined $local_pts and $local_pts + $count < $pts) {
-        say "local_pts=$local_pts, pts=$pts, count=$count, channel=$channel" if $self->{debug};
+        AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=$channel" if $self->{debug};
         if (defined $channel) {
             my $channel_peer = $self->peer_from_id( $channel );
             $self->invoke( Telegram::Updates::GetChannelDifference->new(
@@ -288,18 +288,18 @@ sub _debug_print_update
 {
     my ($self, $upd) = @_;
 
-    say ref $upd;
+    AE::log info => ref $upd;
     
     if ($upd->isa('Telegram::Update::UpdateNewChannelMessage')) {
         my $ch_id = $upd->{message}{to_id}{channel_id};
-        say "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{channel_pts}{$ch_id}"
+        AE::log info => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{channel_pts}{$ch_id}"
             if (exists $upd->{pts});
     }
     elsif ($upd->isa('Telegram::Update::UpdateNewMessage')) {
-        say "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{pts}"
+        AE::log info => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{pts}"
             if (exists $upd->{pts});
     }
-    say "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
+    AE::log info => "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
 
     #if ($upd->isa('Telegram::Updates')) {
     #    for my $u (@{$upd->{updates}}) {
@@ -336,7 +336,7 @@ sub _handle_update
         $upd->isa('Telegram::UpdateEditChannelMessage')
     ) {
         my $chan = exists $upd->{message}{to_id} ? $upd->{message}{to_id}{channel_id} : undef;
-        say Dumper $upd unless defined $chan;
+        AE::log info => Dumper $upd unless defined $chan;
         $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count}, $chan
         ) if defined $chan;
     }
@@ -383,7 +383,7 @@ sub _handle_upd_seq_date
     if ($seq > 0) {
         if ($seq > $self->{session}{update_state}{seq} + 1) {
             # update hole
-            warn "\rupdate seq hole\n";
+            AE::log warn => "\rupdate seq hole\n";
         }
         $self->{session}{update_state}{seq} = $seq;
     }
@@ -397,7 +397,7 @@ sub _handle_upd_diff
     #say ref $diff;
 
     unless ( $diff->isa('Telegram::Updates::DifferenceABC') ) {
-        warn "not diff: " . ref $diff;
+        AE::log warn => "not diff: " . ref $diff;
         return;
     }
     return if $diff->isa('Telegram::Updates::DifferenceEmpty');
@@ -421,8 +421,7 @@ sub _handle_upd_diff
         );
     }
     unless (defined $upd_state) {
-        warn "bad update state";
-        say Dumper $diff;
+        AE::log warn => "bad update state " . Dumper $diff;
         return;
     }
     #say "new pts=$upd_state->{pts}, last=$self->{session}{update_state}{pts}";
@@ -449,7 +448,7 @@ sub _handle_channel_diff
     #say ref $diff;
     
     unless ( $diff->isa('Telegram::Updates::ChannelDifferenceABC') ) {
-        warn "not diff: " . ref $diff;
+        AE::log warn => "not diff: " . ref $diff;
         return;
     }
     return if $diff->isa('Telegram::Updates::ChannelDifferenceEmpty');
@@ -459,12 +458,12 @@ sub _handle_channel_diff
     #say ref $diff;
   
     if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
-        warn "ChannelDifferenceTooLong";
+        AE::log warn => "ChannelDifferenceTooLong";
         $self->_cache_users(@{$diff->{users}});
         $self->_cache_chats(@{$diff->{chats}});
         $self->{session}{update_state}{channel_pts}{$channel} = $diff->{pts};  
-        say "old pts=",$self->{session}{update_state}{channel_pts}{$channel};
-        say "new pts=$diff->{pts}";
+        AE::log info => "old pts=",$self->{session}{update_state}{channel_pts}{$channel};
+        AE::log info => "new pts=$diff->{pts}";
         for my $msg (@{$diff->{messages}}) {
            #say ref $msg;
            &{$self->{on_update}}($msg) if $self->{on_update};
@@ -480,7 +479,7 @@ sub _handle_channel_diff
         #) if defined $channel_peer;
         return;
     }
-    say "channel=$channel, new pts=$diff->{pts}" if $self->{debug};
+    AE::log debug => "channel=$channel, new pts=$diff->{pts}" if $self->{debug};
     $self->{session}{update_state}{channel_pts}{$channel} = $diff->{pts};  
 
     $self->_cache_users(@{$diff->{users}});
@@ -569,7 +568,7 @@ sub _handle_rpc_result
 
     # XXX: handle FLOOD_WAIT here
     my $req_id = $res->{req_msg_id};
-    say "Got result for $req_id" if $self->{debug};
+    AE::log debug => "Got result for $req_id" if $self->{debug};
     if (defined $self->{_req}{$req_id}{cb}) {
         &{$self->{_req}{$req_id}{cb}}( $res->{result} );
     }
@@ -596,15 +595,15 @@ sub _handle_rpc_error
         my $to = $err->{error_message};
         $to =~ s/FLOOD_WAIT_//;
         
-        say "chill for $to sec";
+        AE::log error => "chill for $to sec";
         $self->{_lock} = 1;
         $self->{_flood_timer} = AE::timer($to, 0, sub {
-			say "resend $req_id";
+                AE::log error => "resend $req_id";
             $self->{_lock} = 0;
 
             my $q = $self->{_req}{$req_id}{query};
 		    my $cb = $self->{_req}{$req_id}{cb}; 
-		    say ref $q;
+                    AE::log warn => ref $q;
             # requeue the query
             $self->invoke( $q, $cb);
             delete $self->{_req}{$req_id}; 
@@ -617,9 +616,8 @@ sub _get_err_cb
     my $self = shift;
     return sub {
             my %err = @_;
-            # TODO: log
-            warn "Error: $err{message}" if ($err{message});
-            warn "Error: $err{code}" if ($err{code});
+            AE::log warn => "Error: $err{message}" if ($err{message});
+            AE::log warn => "Error: $err{code}" if ($err{code});
 
             if ($self->{reconnect}) {
                 print "reconnecting" if $self->{debug};
@@ -642,8 +640,8 @@ sub _get_msg_cb
     my $self = shift;
     return sub {
         my $msg = shift;
-	say ref $msg;
-        say Dumper $msg->{object} if $self->{debug};
+        AE::log info => ref $msg;
+        AE::log debug => Dumper $msg->{object} if $self->{debug};
 
         # RpcResults
         $self->_handle_rpc_result( $msg->{object} )
@@ -710,19 +708,10 @@ sub send_text_message
         );
     }
     if (exists $chats->{$arg{to}}) {
-        if (exists $chats->{$arg{to}}{access_hash}) {
-            # channel
-            $peer = Telegram::InputPeerChannel->new( 
-                channel_id => $arg{to}, 
-                access_hash => $chats->{$arg{to}}{access_hash}
-            );
-        }
-        else {
-            # old chats with no access hash
-            $peer = Telegram::InputPeerChat->new( 
-                chat_id => $arg{to}, 
-            );
-        } 
+        $peer = Telegram::InputPeerChannel->new( 
+            channel_id => $arg{to}, 
+            access_hash => $chats->{$arg{to}}{access_hash}
+        ) if defined $chats->{$arg{to}}{access_hash};
     }
 
     if ($arg{to}->isa('Telegram::PeerChannel')) {
@@ -737,7 +726,7 @@ sub send_text_message
 
     $msg->{peer} = $peer;
 
-    say Dumper $msg if defined $self->{debug};
+    AE::log debug => Dumper $msg if defined $self->{debug};
     $self->invoke( $msg ) if defined $peer;
 }
 
@@ -827,6 +816,9 @@ sub name_to_id
             return $uid if defined $chats->{$uid}{username} and $chats->{$uid}{username} eq $nick;
         }
     }
+    elsif ($nick =~ /^[0-9]+$/) {
+        return $nick if exists $users->{$nick} or exists $chats->{$nick};
+    }
     else {
         for my $uid (keys %$users) {
             return $uid if ($users->{$uid}{first_name} // '').' '.($users->{$uid}{last_name} // '') eq $nick;
@@ -900,11 +892,11 @@ sub peer_name
     my $chats = $self->{session}{chats};
 
     if (exists $users->{$id}) {
-        say "found user ", Dumper($users->{$id}) if $self->{debug};
+        AE::log debug => "found user ", Dumper($users->{$id}) if $self->{debug};
         return ($users->{$id}{first_name} // '' ).' '.($users->{$id}{last_name} // '');
     }
     if (exists $chats->{$id}) {
-        say "found chat ", Dumper($chats->{$id}) if $self->{debug};
+        AE::log debug => "found chat ", Dumper($chats->{$id}) if $self->{debug};
         return ($chats->{$id}{title} // "chat $id");
     }
     return undef;
@@ -914,7 +906,7 @@ sub _get_timer_cb
 {
     my $self = shift;
     return sub {
-        say "timer tick" if $self->{debug};
+        AE::log debug => "timer tick" if $self->{debug};
         $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
         #        $self->invoke( Telegram::Updates::GetDifference->new( 
         #            date => $self->{session}{update_state}{date},
