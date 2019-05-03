@@ -36,23 +36,24 @@ use Telegram::Auth::SentCode;
 use Telegram::Auth::SignIn;
 
 # new connection
-#my $proxy = new Net::SOCKS( socks_addr => $conf->{proxy}{addr},
-#    socks_port => $conf->{proxy}{port}, 
-#    user_id => $conf->{proxy}{user},
-#    user_password => $conf->{proxy}{pass}, 
-#    protocol_version => 5,
-#);
+my $proxy = new Net::SOCKS( socks_addr => $conf->{proxy}{addr},
+    socks_port => $conf->{proxy}{port}, 
+    user_id => $conf->{proxy}{user},
+    user_password => $conf->{proxy}{pass}, 
+    protocol_version => 5,
+);
 
-#my $sock = $proxy->connect( peer_addr => $conf->{dc}{addr}, peer_port => $conf->{dc}{port} ) or die;
+my $sock = $proxy->connect( peer_addr => $conf->{dc}{addr}, peer_port => $conf->{dc}{port} ) or die;
     
-my $sock = IO::Socket::INET->new(
-    PeerAddr => $conf->{dc}{addr}, 
-    PeerPort => $conf->{dc}{port},
-    Proto => 'tcp'
-) or die;
+#my $sock = IO::Socket::INET->new(
+#    PeerAddr => $conf->{dc}{addr}, 
+#    PeerPort => $conf->{dc}{port},
+#    Proto => 'tcp'
+#) or die;
 
 # this creates new MTProto session
-my $mt = MTProto->new( socket => $sock, session => undef, debug => 1 );
+#my $mt = MTProto->new( socket => $sock, session => undef, debug => 1 );
+my $mt = MTProto->new( socket => AnyEvent::Handle->new( fh => $sock ), session => undef, debug => 1 );
 
 # The Query
 my $query = Telegram::Auth::SendCode->new( phone_number => $conf->{user}{phone},
@@ -74,7 +75,7 @@ my $conn = Telegram::InitConnection->new(
 );
 
 # Wrapper layer
-$mt->invoke( Telegram::InvokeWithLayer->new( layer => 76, query => $conn ) );
+$mt->invoke( Telegram::InvokeWithLayer->new( layer => 78, query => $conn ) );
 
 $mt->{on_message} = sub {
     my $msg = shift;
