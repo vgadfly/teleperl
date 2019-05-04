@@ -81,6 +81,7 @@ sub init {
 
     $app->cache->set( 'conf' => $conf );
     $app->cache->set( 'tg' => $tg );
+    $app->cache->set( 'argobject' => [] );
 
     $app->set_prompt('T> ');
     $app->ornaments('md,me,,');
@@ -95,6 +96,7 @@ sub init {
 
 sub command_map
 {
+    argobject   => 'Teleperl::Command::Argobject',
     chats       => 'Teleperl::Command::Chats',
     debug       => 'Teleperl::Command::Debug',
     dialogs     => 'Teleperl::Command::Dialogs',
@@ -119,7 +121,9 @@ sub command_map
 sub command_alias
 {
     m => 'message',
-    msg => 'message'
+    msg => 'message',
+    new => 'argobject',
+    obj => 'argobject',
 }
 
 sub _format_time {
@@ -640,6 +644,7 @@ sub usage_text {
     ARGUMENTS
         <name>          name of Telegram::* class to call ->new() upon
         <fname>         function from schema/docs - will guess --class
+        $<number>       substitute instantiated slot from 'argobject' command
 
     OPTIONS
         Long form, corresponding to field name, e.g. '--date' if class
@@ -691,7 +696,15 @@ sub complete_arg
             }
         }
     }
-    # TODO subcmd $vars for non-bare types
+
+    if ($text =~ /^\$/) {
+        my $arr = $self->cache->get('argobject');
+        my @slots;
+        for (my $i = 0; $i < $#$arr; $i++) {
+            push @slots, '$'.$i if defined $arr->[$i];
+        }
+        return @slots;
+    }
 
     return undef;
 }
@@ -699,7 +712,15 @@ sub complete_arg
 sub validate
 {
     my ($self, $opts, @args) = @_;
-    die "Telegram::* subclass or schema.funcMethodName must be specified" unless defined $opts->{class} or defined $opts->{func};
+    die "Telegram::* subclass or schema.funcMethodName must be specified"
+        unless defined $opts->{class} or defined $opts->{func};
+
+    my $arr = $self->cache->get('argobject');
+    for (@args) {
+        if (/^\$[0-9]+$/) {
+            die "slot $_ is unset" if not defined $arr->[substr $_, 1];
+        }
+    }
 }
 
 sub run
@@ -707,9 +728,18 @@ sub run
     my ($self, $opts) = @_;
 
     my $tg = $self->cache->get('tg');
+    my $argo = $self->cache->get('argobject');
 
     my $obj = $class->new(
-        map { ($_ => $opts->{$_}) } grep { $_ ne 'class' && $_ ne 'func' } keys %$opts
+        map {
+            my $v = $opts->{$_};
+            $v = $argo->[substr $v, 1] if $v =~ /^\$[0-9]+$/;
+            ($_ => $v);
+        } grep {
+            $_ ne 'class' &&
+            $_ ne 'func' &&
+            $_ ne 'flags'   # XXX what if in future scheme it will be renamed?
+        } keys %$opts
     );
     $class = undef;
     my $retid;
@@ -720,5 +750,273 @@ sub run
     );
 }
 
-1;
+package Teleperl::Command::Argobject;
+use base "CLI::Framework::Command::Meta";
 
+sub usage_text {
+    q{
+    argobject [<opt>] push --class <name> [<options>]
+    argobject [<opt>] push [<list of builtin bare types>]
+    argobject [<opt>] dump
+    argobject [<opt>] delete <indexes>
+    argobject [<opt>] pop
+    argobject [<opt>] shift
+    argobject [<opt>] inputpeer <self|empty|@username|@chatname|numericalid>
+
+    OPTIONS
+        --on-slot=N     do operation on sub-array in slot N instead of global
+
+    ARGUMENTS (subcommands)
+        push            add new slot w/class or bare types to end of (sub)array
+        dump            print current (sub)array with Data::Dumper style 3
+        delete          arguments are indexes of elements to delete
+        pop             delete last element and dump it to screen
+        shift           delete first element, dump it to screen and shift others
+        inputPeer       as 'push' but for InputPeer only with proper completion
+
+    ARGUMENTS in subcommands
+        <cname>         name of Telegram::* class to call ->new() upon
+        <indexes>       numbers - indexes of slots in (sub)array
+
+    SUBCOMMAND OPTIONS
+        Long form, corresponding to field name, e.g. '--date' if class
+        has field 'date' - these will be arguments to new().
+
+    *BUG*! You may need to erase and try opt again for autocomplete to work,
+        and option may be non-recognized until completion tried.
+    }
+}
+
+sub option_spec {
+    [ "on-slot=i"       => "operate on slot N instead of whole array"  ],
+}
+
+sub subcommand_alias {
+    'append'    => 'push',
+    'add'       => 'push',
+    'unset'     => 'delete',
+}
+
+sub notify_of_subcommand_dispatch {
+    my ($self, $subcommand, $cmd_opts, @args) = @_;
+
+    my $argobj = $self->cache->get('argobject');
+    if (my $i = $cmd_opts->{"on_slot"}) {
+        die "Invalid slot $i" unless $i < $#$argobj+2; # XXX really need this?
+
+        $argobj->[$i] = [] unless ref $argobj->[$i] eq 'ARRAY';
+
+        $argobj = $argobj->[$i];
+    }
+
+    $self->cache->set('_argobjarr' => $argobj);
+}
+
+package Teleperl::Command::Argobject::Push;
+use base "Teleperl::Command::Argobject";
+
+use Telegram::ObjTable;
+use Data::Dumper;
+
+our @cnames = map { $_->{class} } values %Telegram::ObjTable::tl_type;
+our $class = undef;
+
+sub option_spec {
+    my @opts = ([ "class=s", "which to instantiate" ]);
+    if ($class) {
+        require Class::Inspector->filename($class);
+        no strict 'refs';
+        push @opts, [ "$_=s", "" ] for keys %{"$class\::FIELDS"};
+    }
+    return @opts;
+}
+
+sub complete_arg
+{
+    my ($self, $lastopt, $argnum, $text, $attribs, $rawARGV) = @_;
+#print "|$text,$lastopt,$argnum#".join(':',@args)."%".join('^',@$rawARGV)."|\n";
+    # the trick is: we must change $class on the fly so option_spec()
+    # will return class fields as options and they will be completed
+    # by CLIF - not us! - on *next* iteration.
+    if ($argnum == 1) {
+        if ($lastopt =~ /^--class$/) {
+            $class = $text if scalar grep { $_ eq $text } @cnames;
+            return @cnames;
+        }
+    }
+
+    my @args = @$rawARGV;
+    if (@args > 1) {
+        for my $i (0..$#args-1) {
+            if ($args[$i] eq '--class' and scalar grep { $_ eq $args[$i+1] } @cnames) {
+                $class = $args[$i+1];
+                last;
+            }
+        }
+    }
+
+    if ($text =~ /^\$/) {
+        my $arr = $self->cache->get('argobject');   # XXX or _argobjarr ?
+        my @slots;
+        for (my $i = 0; $i < $#$arr; $i++) {
+            push @slots, '$'.$i if defined $arr->[$i];
+        }
+        return @slots;
+    }
+
+    return undef;
+}
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "Telegram::* subclass or bare args must be specified"
+        unless defined $opts->{class} or @args;
+}
+
+sub run
+{
+    my ($self, $opts, @args) = @_;
+
+    my $argo = $self->cache->get('_argobjarr');
+
+    if ($opts->{class}) {
+        my $obj = $class->new(
+            map {
+                my $v = $opts->{$_};
+                $v = $argo->[substr $v, 1] if $v =~ /^\$[0-9]+$/;
+                ($_ => $v);
+            } grep {
+                $_ ne 'class' &&
+                $_ ne 'flags'   # XXX what if in future scheme it will be renamed?
+            } keys %$opts
+        );
+        $class = undef;
+        push @$argo, $obj;
+    }
+    elsif (@args) {
+        push @$argo, $_ for @args;
+    }
+    # XXX check else?
+    return $#$argo;
+}
+
+package Teleperl::Command::Argobject::InputPeer;
+use base "Teleperl::Command::Argobject";
+
+use Telegram::InputPeer;
+
+sub complete_arg
+{
+    my ($self, $lastopt, $argnum, $text, $attribs) = @_;
+
+    my $tg = $self->cache->get('tg');
+
+    if ($argnum == 1) {
+        return ('self', 'empty', $tg->cached_nicknames(), $tg->cached_usernames());
+    }
+
+    return undef;
+}
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "Exactly one argument describing peer must be given"
+        unless @args == 1;
+
+    die "Invalid peer specification"
+        unless $args[0] =~ /^(self|empty|@.+|-?[0-9]+)$/i;
+}
+
+sub run
+{
+    my ($self, $opts, $peer) = @_;
+
+    my $tg = $self->cache->get('tg');
+    my $argo = $self->cache->get('_argobjarr');
+
+    if ($peer eq 'self') {
+        $peer = Telegram::InputPeerSelf->new;
+    }
+    elsif ($peer eq 'empty') {
+        $peer = Telegram::InputPeerEmpty->new;
+    }
+    else {
+        $peer = $tg->name_to_id($peer);
+        $peer = $tg->peer_from_id($peer);
+    }
+    die "unknown user/chat" unless defined $peer;
+
+    push @$argo, $peer;
+    return $#$argo;
+}
+
+package Teleperl::Command::Argobject::Delete;
+use base "Teleperl::Command::Argobject";
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+
+    die "Indexes must be given as arguments" unless @args;
+    for (@args) {
+        die "$_ is not an integer" unless /^[0-9]+$/;
+    }
+}
+
+sub run {
+    my ($self, $opts, @args) = @_;
+
+    my $argo = $self->cache->get('_argobjarr');
+
+    my $ret = "";
+    for (@args) {
+        if (defined $argo->[$_]) {
+            $argo->[$_] = undef;
+            $ret .= "$_ ";
+        }
+    }
+
+    return "Deleted $ret";
+}
+
+package Teleperl::Command::Argobject::Dump;
+use base "Teleperl::Command::Argobject";
+
+use Data::Dumper;
+
+sub run {
+    my $self = shift;
+
+    local $Data::Dumper::Indent = 3;
+    return Dumper $self->cache->get('_argobjarr');
+}
+
+package Teleperl::Command::Argobject::Pop;
+use base "Teleperl::Command::Argobject";
+
+use Data::Dumper;
+
+sub run {
+    my $self = shift;
+
+    my $argo = $self->cache->get('_argobjarr');
+    local $Data::Dumper::Indent = 1;
+    return Dumper(pop @$argo);
+}
+
+package Teleperl::Command::Argobject::Shift;
+use base "Teleperl::Command::Argobject";
+
+use Data::Dumper;
+
+sub run {
+    my $self = shift;
+
+    my $argo = $self->cache->get('_argobjarr');
+    local $Data::Dumper::Indent = 1;
+    return Dumper(shift @$argo);
+}
+
+1;
