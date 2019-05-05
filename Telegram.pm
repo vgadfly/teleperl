@@ -85,7 +85,7 @@ sub start
 
     if (defined $self->{_proxy}) {
         # XXX: blocking connect
-        AE::log info => "using proxy ", Dumper [ map{ $self->{_proxy}{$_} } qw/addr port/ ];
+        AE::log info => "using proxy " . Dumper [ map{ $self->{_proxy}{$_} } qw/addr port/ ];
         my $sock = IO::Socket::Socks->new(
             ProxyAddr => $self->{_proxy}{addr},
             ProxyPort => $self->{_proxy}{port},
@@ -97,7 +97,7 @@ sub start
         $aeh = AnyEvent::Handle->new( fh => $sock );
     }
     else {
-        AE::log info => "not using proxy: ", Dumper [ map{ $self->{_dc}{$_}} qw/addr port/ ];
+        AE::log info => "not using proxy: " . Dumper [ map{ $self->{_dc}{$_}} qw/addr port/ ];
         $aeh = AnyEvent::Handle->new( 
             connect => [ map{ $self->{_dc}{$_}} qw/addr port/ ],
             on_connect_error => sub { die "Connection error" }
@@ -146,7 +146,7 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
-    AE::log info => ref $query;
+    AE::log info => __LINE__ . " " . ref $query;
     AE::log debug => Dumper $query if $self->{debug};
     if ($self->{_first}) {
         
@@ -161,7 +161,7 @@ sub invoke
                 lang_code => 'en',
                 query => $query
         );
-        my $wrapper = Telegram::InvokeWithLayer->new( layer => 76, query => $conn ); 
+        my $wrapper = Telegram::InvokeWithLayer->new( layer => 78, query => $conn ); 
         
         if ($self->{_lock}) {
             $self->_enqueue( $wrapper, $res_cb );
@@ -288,7 +288,7 @@ sub _debug_print_update
 {
     my ($self, $upd) = @_;
 
-    AE::log info => ref $upd;
+    AE::log info => __LINE__ . " " . ref $upd;
     
     if ($upd->isa('Telegram::Update::UpdateNewChannelMessage')) {
         my $ch_id = $upd->{message}{to_id}{channel_id};
@@ -640,7 +640,7 @@ sub _get_msg_cb
     my $self = shift;
     return sub {
         my $msg = shift;
-        AE::log info => ref $msg;
+        AE::log info => __LINE__ . " " . ref $msg;
         AE::log debug => Dumper $msg->{object} if $self->{debug};
 
         # RpcResults
@@ -885,7 +885,7 @@ sub peer_from_id
 
 sub peer_name
 {
-    my ($self, $id) = @_;
+    my ($self, $id, $noundef) = @_;
     croak unless defined $id;
 
     my $users = $self->{session}{users};
@@ -899,6 +899,7 @@ sub peer_name
         AE::log debug => "found chat ", Dumper($chats->{$id}) if $self->{debug};
         return ($chats->{$id}{title} // "chat $id");
     }
+    return $id if $noundef;
     return undef;
 }
 

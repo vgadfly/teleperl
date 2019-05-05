@@ -78,29 +78,31 @@ sub pkgname($$)
 # class generator
 
 # Vector templates
+sub _tmpl2vec($) {
+    my $arg = shift;
+
+    if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
+        $arg->{type}{name} = $arg->{type}{t_args}[0];
+        $arg->{type}{vector} = 1;
+        delete $arg->{type}{template};
+        delete $arg->{type}{t_args};
+    }
+}
+
 for my $type (@{$parser->YYData->{types}}) {
     # skip Vector definition
     next if $type->{type}{name} =~ '^[Vv]ector$';
     
     for my $arg (@{$type->{args}}) {
-        if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
-            $arg->{type}{name} = $arg->{type}{t_args}[0];
-            $arg->{type}{vector} = 1;
-            delete $arg->{type}{template};
-            delete $arg->{type}{t_args};
-        }
+        _tmpl2vec $arg;
     }
 }
 for my $type (@{$parser->YYData->{funcs}}) {
     $type->{func} = 1;
     for my $arg (@{$type->{args}}) {
-        if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
-            $arg->{type}{name} = $arg->{type}{t_args}[0];
-            $arg->{type}{vector} = 1;
-            delete $arg->{type}{template};
-            delete $arg->{type}{t_args};
-        }
+        _tmpl2vec $arg;
     }
+    _tmpl2vec $type;    # return type of function also may be Vector
 }
 
 my @types = grep {!exists $builtin{$_->{type}{name}} } @{$parser->YYData->{types}};
@@ -259,7 +261,23 @@ for my $type (@types) {
     my $hash = $type->{hash}; # crc
     $hash =~ s/^\#//;
     $path = $basepath unless $type->{func};
-    print $f "  0x$hash => { file => '$path', class => '$pkg' },\n";
+    print $f "  0x$hash => { file => '$path', class => '$pkg',";
+    if ($type->{func}) {
+        print $f " func => '$type->{id}',";
+        my @bang = grep { $_->{type}{bang} } @{$type->{args}};
+        if (@bang) {
+            print $f " bang => '$bang[0]->{name}',";
+        } else {
+            print $f " returns => ";
+            if (exists $builtin{$type->{type}{name}}) {
+                print $f "'" . $type->{type}{name} . "',";
+            } else {
+                print $f "'$basepkg',";
+            }
+        }
+        print $f " vector => 1," if $type->{type}{vector};
+    }
+    print $f " },\n";
 }
 print $f ");\n1;\n";
 close $f;

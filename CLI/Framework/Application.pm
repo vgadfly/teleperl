@@ -940,7 +940,7 @@ sub _cmd_request_completions {
                 }
                 @userret = $cmd->$compmeth($lastopt, $argnum, $text,
                          $attribs, \@rawARGV, @prefixARGV);
-#print "|$text,$line,$start,$end: $argnum $lastopt#".substr($line,0,$start)."#".scalar(@userret).join(':',@userret)."|\n";
+#print "|$text,$line,$start,$end: $argnum $lastopt#".substr($line,0,$start)."#".scalar(@userret).join(':',@userret)."^".join(':',@matches)."|\n";
             }
 
             # return cmd/opt matches, user's, both or nothing?
@@ -952,9 +952,9 @@ sub _cmd_request_completions {
             if (@userret && defined $userret[0]) {
                 if (ref $userret[0]) {
                     @userret = $term->completion_matches($text, $userret[0]);
+                } # XXX why push was ^^^ here? what breaks in 2016? I don't remember :)
                     # add subcommand options to return of user's completer
                     push @userret, @matches if @matches && $text =~ /^-/;
-                }
                 @matches = @userret;
             }
             elsif (@userret && !defined $userret[0]) {
