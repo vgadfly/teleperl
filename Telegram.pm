@@ -146,9 +146,10 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
-    AE::log info => __LINE__ . " " . ref $query;
+    AE::log info => "invoke: " . ref $query;
     AE::log trace => Dumper $query if $self->{debug};
     if ($self->{_first}) {
+        AE::log debug => "first, using wrapper";
         
         # Wrapper conn
         my $conn = Telegram::InitConnection->new( 
@@ -182,6 +183,7 @@ sub invoke
         $req_id = $self->{_mt}->invoke( $query );
     }
 
+    AE::log debug => "invoked $req_id for " . ref $query;
     $self->{_req}{$req_id}{query} = $query;
     # store handler for this query result
     $self->{_req}{$req_id}{cb} = $res_cb if defined $res_cb;
@@ -250,7 +252,7 @@ sub _check_pts
         $self->{session}{update_state}{pts};
 
     if (defined $local_pts and $local_pts + $count < $pts) {
-        AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=$channel" if $self->{debug};
+        AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"") if $self->{debug};
         if (defined $channel) {
             my $channel_peer = $self->peer_from_id( $channel );
             $self->invoke( Telegram::Updates::GetChannelDifference->new(
