@@ -7,9 +7,9 @@ use Teleperl;
 
 my $app = Teleperl->new;
 $app->set_default_command('console');
-$app->run;
+$app->run || warn("non-clean exit, will not save session\n"), exit;
 
-say "quittin..";
+my $sessfile = $app->cache->get('session');
 my $tg = $app->cache->get('tg');
-store( $tg->{session}, 'session.dat' );
-
+say "quittin.. saving to $sessfile";
+store( $tg->{session}, $sessfile );

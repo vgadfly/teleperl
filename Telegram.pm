@@ -85,7 +85,7 @@ sub start
 
     if (defined $self->{_proxy}) {
         # XXX: blocking connect
-        AE::log info => "using proxy " . Dumper [ map{ $self->{_proxy}{$_} } qw/addr port/ ];
+        AE::log info => "using proxy %s:%d", map { $self->{_proxy}{$_} } qw/addr port/;
         my $sock = IO::Socket::Socks->new(
             ProxyAddr => $self->{_proxy}{addr},
             ProxyPort => $self->{_proxy}{port},
@@ -97,7 +97,7 @@ sub start
         $aeh = AnyEvent::Handle->new( fh => $sock );
     }
     else {
-        AE::log info => "not using proxy: " . Dumper [ map{ $self->{_dc}{$_}} qw/addr port/ ];
+        AE::log info => "not using proxy: %s:%d", map{ $self->{_dc}{$_}} qw/addr port/;
         $aeh = AnyEvent::Handle->new( 
             connect => [ map{ $self->{_dc}{$_}} qw/addr port/ ],
             on_connect_error => sub { die "Connection error" }
@@ -146,9 +146,10 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
-    AE::log info => __LINE__ . " " . ref $query;
-    AE::log debug => Dumper $query if $self->{debug};
+    AE::log info => "invoke: " . ref $query;
+    AE::log trace => Dumper $query if $self->{debug};
     if ($self->{_first}) {
+        AE::log debug => "first, using wrapper";
         
         # Wrapper conn
         my $conn = Telegram::InitConnection->new( 
@@ -182,6 +183,7 @@ sub invoke
         $req_id = $self->{_mt}->invoke( $query );
     }
 
+    AE::log debug => "invoked $req_id for " . ref $query;
     $self->{_req}{$req_id}{query} = $query;
     # store handler for this query result
     $self->{_req}{$req_id}{cb} = $res_cb if defined $res_cb;
@@ -250,7 +252,7 @@ sub _check_pts
         $self->{session}{update_state}{pts};
 
     if (defined $local_pts and $local_pts + $count < $pts) {
-        AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=$channel" if $self->{debug};
+        AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"") if $self->{debug};
         if (defined $channel) {
             my $channel_peer = $self->peer_from_id( $channel );
             $self->invoke( Telegram::Updates::GetChannelDifference->new(
@@ -288,18 +290,18 @@ sub _debug_print_update
 {
     my ($self, $upd) = @_;
 
-    AE::log info => __LINE__ . " " . ref $upd;
+    AE::log debug => __LINE__ . " " . ref $upd;
     
     if ($upd->isa('Telegram::Update::UpdateNewChannelMessage')) {
         my $ch_id = $upd->{message}{to_id}{channel_id};
-        AE::log info => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{channel_pts}{$ch_id}"
+        AE::log debug => "chan=$ch_id pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{channel_pts}{$ch_id}"
             if (exists $upd->{pts});
     }
     elsif ($upd->isa('Telegram::Update::UpdateNewMessage')) {
-        AE::log info => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{pts}"
+        AE::log debug => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{update_state}{pts}"
             if (exists $upd->{pts});
     }
-    AE::log info => "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
+    AE::log debug => "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
 
     #if ($upd->isa('Telegram::Updates')) {
     #    for my $u (@{$upd->{updates}}) {
@@ -314,19 +316,22 @@ sub _handle_update
 
     #say ref $upd;
 
-    #$self->_debug_print_update($upd);
+    $self->_debug_print_update($upd) if $self->{debug};
     
     if ($upd->isa('Telegram::UpdateChannelTooLong')) {
         my $channel = $self->peer_from_id( $upd->{channel_id} );
+        my $local_pts = $self->{session}{update_state}{channel_pts}{$upd->{channel_id}};
+        AE::log warn => "rcvd ChannelTooLong for $upd->{channel_id} but no local pts thus no updates"
+            unless defined $local_pts;
         $self->invoke(
             Telegram::Updates::GetChannelDifference->new(
                 channel => $channel,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
-                pts => $self->{session}{update_state}{channel_pts}{$upd->{channel_id}},
+                pts => $local_pts,
                 limit => 0
             ),
             sub { $self->_handle_channel_diff( $upd->{channel_id}, @_ ) }
-        ) if defined $channel;
+        ) if defined $channel and $local_pts;
         return;
     }
     
@@ -336,7 +341,7 @@ sub _handle_update
         $upd->isa('Telegram::UpdateEditChannelMessage')
     ) {
         my $chan = exists $upd->{message}{to_id} ? $upd->{message}{to_id}{channel_id} : undef;
-        AE::log info => Dumper $upd unless defined $chan;
+        AE::log warn => "chanmsg without dest ".Dumper $upd unless defined $chan;
         $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count}, $chan
         ) if defined $chan;
     }
@@ -585,6 +590,7 @@ sub _handle_rpc_error
     &{$self->{on_error}}($err) if defined $self->{on_error};
     $self->{error} = $err;
 
+    AE::log warn => "RPC error %s on req %d", $err->{error_message}, $req_id;
     if ($err->{error_message} eq 'USER_DEACTIVATED') {
         $self->{_timer} = undef;
     }
@@ -641,7 +647,7 @@ sub _get_msg_cb
     return sub {
         my $msg = shift;
         AE::log info => __LINE__ . " " . ref $msg;
-        AE::log debug => Dumper $msg->{object} if $self->{debug};
+        AE::log trace => Dumper $msg->{object} if $self->{debug};
 
         # RpcResults
         $self->_handle_rpc_result( $msg->{object} )
@@ -726,7 +732,7 @@ sub send_text_message
 
     $msg->{peer} = $peer;
 
-    AE::log debug => Dumper $msg if defined $self->{debug};
+    AE::log trace => Dumper $msg if defined $self->{debug};
     $self->invoke( $msg ) if defined $peer;
 }
 
@@ -892,11 +898,11 @@ sub peer_name
     my $chats = $self->{session}{chats};
 
     if (exists $users->{$id}) {
-        AE::log debug => "found user ", Dumper($users->{$id}) if $self->{debug};
+        AE::log trace => "found user $id " . Dumper($users->{$id}) if $self->{debug};
         return ($users->{$id}{first_name} // '' ).' '.($users->{$id}{last_name} // '');
     }
     if (exists $chats->{$id}) {
-        AE::log debug => "found chat ", Dumper($chats->{$id}) if $self->{debug};
+        AE::log trace => "found chat $id " . Dumper($chats->{$id}) if $self->{debug};
         return ($chats->{$id}{title} // "chat $id");
     }
     return $id if $noundef;

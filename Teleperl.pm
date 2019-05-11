@@ -4,6 +4,7 @@ use utf8;
 package Teleperl;
 use base "CLI::Framework";
 
+use Carp;
 use Config::Tiny;
 use Storable qw( store retrieve freeze thaw );
 use Encode;
@@ -12,17 +13,21 @@ use AnyEvent::Impl::Perl;
 use AnyEvent;
 use AnyEvent::Log;
 
-use Text::ParseWords;
-use Term::ReadLine;
 use Telegram;
 
 use Data::Dumper;
 
+sub settable_opts {
+    [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
+    [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log'    ],
+    [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
+}
+
 sub option_spec {
-    [ 'verbose|v'   => 'be verbose'                         ],
+    &settable_opts(),
     [ 'encoding=s'  => 'if your console is not in UTF-8'    ],
     [ 'noupdate!'   => 'pass noupdate to Telegram->new'     ],
-    [ 'debug!'      => 'pass debug to Telegram->new & AE'   ],
+    [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
 }
 
 sub init {
@@ -31,17 +36,19 @@ sub init {
     $app->set_current_command('help') if $opts->{help};
 
     $app->cache->set( 'verbose' => $opts->{verbose} );
+    $app->cache->set( 'session' => $opts->{session} );
+    $app->cache->set( 'debug'   => $opts->{debug} );
 
     # XXX do validate
     $app->cache->set('encoding' => Encode::find_encoding($opts->{encoding}))
         if $opts->{encoding};
 
-    my $session = retrieve( 'session.dat' ) if -e 'session.dat';
-    my $conf = Config::Tiny->read("teleperl.conf");
+    my $session = retrieve( $opts->session ) if -e $opts->session;
+    my $conf = Config::Tiny->read($opts->config);
     
     $Data::Dumper::Indent = 1;
     $AnyEvent::Log::FILTER->level(
-        $opts->{debug} ? "trace" :
+        $opts->{debug} ? ($opts->{debug}>1 ? "trace" : "debug") :
             $opts->{verbose} ? "info" : "note");
     $AnyEvent::Log::LOG->fmt_cb(sub {
         my ($time, $ctx, $lvl, $msg) = @_;
@@ -62,6 +69,13 @@ sub init {
         join "", @res
 
     });
+
+    # we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
+    $SIG{__WARN__} = sub {
+        scalar( grep /AnyEvent|log/, map { (caller($_))[0..3] } (1..4) )
+            ? warn $_[0]
+            : AE::log warn => &Carp::longmess;
+    };
 
     my $tg = Telegram->new(
         dc => $conf->{dc},
@@ -98,7 +112,6 @@ sub command_map
 {
     argobject   => 'Teleperl::Command::Argobject',
     chats       => 'Teleperl::Command::Chats',
-    debug       => 'Teleperl::Command::Debug',
     dialogs     => 'Teleperl::Command::Dialogs',
     history     => 'Teleperl::Command::History',
     invoke      => 'Teleperl::Command::Invoke',
@@ -106,6 +119,7 @@ sub command_map
     message     => 'Teleperl::Command::Message',
     'read'      => 'Teleperl::Command::Read',
     sessions    => 'Teleperl::Command::Sessions',
+    set         => 'Teleperl::Command::Set',
     updates     => 'Teleperl::Command::Updates',
     users       => 'Teleperl::Command::Users',
  
@@ -281,17 +295,36 @@ sub run
     $tg->send_text_message( to => $peer, message => join(' ', @msg) );
 }
 
-package Teleperl::Command::Debug;
-use base "CLI::Framework::Command";
+package Teleperl::Command::Set;
+use base "CLI::Framework::Command::Meta";
+
+*option_spec = \&Teleperl::settable_opts;
 
 sub run
 {
     my ($self, $opts, $val) = @_;
 
+    my $ret = "";
+    my $app = $self->get_app;
     my $tg = $self->cache->get('tg');
-    $tg->{debug} = $val;
 
-    return "debug is set to $val";
+    if (exists $opts->{debug}) {
+        $tg->{debug} = $opts->debug;
+        $app->cache->set( 'debug'   => $opts->{debug} );
+        $ret .= "debug is set to $opts->{debug}\n";
+    }
+
+    if (exists $opts->{verbose}) {
+        $app->cache->set( 'verbose' => $opts->{verbose} );
+        $ret .= "verbose is set to $opts->{verbose}\n";
+    }
+
+    if ($opts->{session} ne $app->cache->get('session')) {
+        $app->cache->set( 'session' => $opts->{session} );
+        $ret .= "session is set to $opts->{session}\n";
+    }
+
+    return $ret || "no opts changed";
 }
 
 package Teleperl::Command::Dialogs;
@@ -305,24 +338,41 @@ sub handle_dialogs
 {
     my ($tg, $count, $say, $ds) = @_;
 
+    my $out = sub {
+        if ($count) {
+            $say->(sprintf "%4d %-4s %-10d %6d %-23s %s", $count, @_);
+        } else {
+            $say->(sprintf "\ndlg# Type Id         Unread \@username               Display Name");
+        }
+    };
+
     if ($ds->isa('Telegram::Messages::DialogsABC')) {
         my %users;
         my %chats;
         my $ipeer;
 
+        $tg->_cache_users(@{$ds->{users}});
+        $tg->_cache_chats(@{$ds->{chats}});
         for my $u (@{$ds->{users}}) {
             $users{$u->{id}} = $u;
         }
         for my $c (@{$ds->{chats}}) {
             $chats{$c->{id}} = $c;
         }
+        $out->() if $count == 0 && scalar @{$ds->{dialogs}};
         for my $d (@{$ds->{dialogs}}) {
             $count++;
             my $peer = $d->{peer};
             if ($peer->isa('Telegram::PeerUser')) {
                 my $user_id = $peer->{user_id};
                 $peer = $users{$user_id};
-                $say->(($peer->{first_name}//"")." ".($peer->{username} // ""));
+                $out->(
+                    $peer->{bot} ? "bot" : "user",
+                    $user_id,
+                    $d->{unread_count},
+                    $peer->{username} // "",
+                    ($peer->{first_name}//"")." ".($peer->{last_name} // "")
+                );
                 $ipeer = Telegram::InputPeerUser->new(
                     user_id => $user_id,
                     access_hash => $peer->{access_hash}
@@ -335,13 +385,26 @@ sub handle_dialogs
                     channel_id => $chan_id,
                     access_hash => $peer->{access_hash}
                 );
-                $say->("#" . ($peer->{username} // "channel with no name o_O"));
+                $out->(
+                    ($peer->{megagroup} ? 'sgrp' : '#') .
+                    (ref $peer =~ /Forbidden/ ? 'ban' : ''),
+                    $chan_id,
+                    $d->{unread_count},
+                    ($peer->{username} // "#chan with no name o_O"),
+                    $peer->{title} // "",
+                );
             }
             if ($peer->isa('Telegram::PeerChat')){
                 my $chat_id = $peer->{chat_id};
                 $peer = $chats{$chat_id};
                 $ipeer = Telegram::InputPeerChat->new(
                     chat_id => $chat_id,
+                );
+                $out->(
+                    ref $peer =~ /Forbidden/
+                        ? 'frbd'
+                        : 'chat',
+                    $chat_id, $d->{unread_count}, "", $peer->{title} // ""
                 );
             }
         }
@@ -559,6 +622,13 @@ use Telegram::Messages::ReadHistory;
 use Telegram::Channels::ReadHistory;
 use Data::Dumper;
 
+sub usage_text {
+    q{
+    read <peer> [<max_id>]: Mark dialog with <peer> as read, all
+                            messages by default, or up to <max_id> in history
+    }
+}
+
 sub complete_arg
 {
     my ($self, $lastopt, $argnum, $text, $attribs) = @_;
@@ -566,11 +636,10 @@ sub complete_arg
     my $tg = $self->cache->get('tg');
 
     if ($argnum == 1) {
-        return ($tg->cached_nicknames());
+        return ($tg->cached_nicknames(), $tg->cached_usernames);
     }
 
     return undef;
-
 }
 
 sub validate
@@ -581,7 +650,7 @@ sub validate
 
 sub run
 {
-    my ($self, $opts, $peer, @msg) = @_;
+    my ($self, $opts, $peer, $max) = @_;
 
     my $tg = $self->cache->get('tg');
 
@@ -593,13 +662,13 @@ sub run
     if ($peer->isa('Telegram::InputPeerChannel')) {
         $tg->invoke( Telegram::Channels::ReadHistory->new(
                 channel => $peer,
-                max_id => 0,
+                max_id => $max // 0,
         ), sub { $self->get_app->render(Dumper @_) } );
     }
     else {
         $tg->invoke( Telegram::Messages::ReadHistory->new(
                 peer => $peer,
-                max_id => 0,
+                max_id => $max // 0,
         ), sub { $self->get_app->render(Dumper @_) } );
     }
 }

@@ -585,8 +585,7 @@ sub _handle_msg
     my ($self, $msg) = @_;
 
     if ($self->{debug}) {
-        AE::log debug => "handle_msg $msg->{seq},$msg->{msg_id}: ";
-        AE::log debug => ref $msg->{object};
+        AE::log debug => "handle_msg $msg->{seq},$msg->{msg_id}: " . ref $msg->{object};
     }
 
     # unpack msg containers
@@ -704,7 +703,7 @@ sub _ack
 {
     my ($self, @msg_ids) = @_;
     my ($package, $filename, $line) = caller;
-    AE::log debug => "ack ", join (",", @msg_ids), "\n" if $self->{debug};
+    AE::log debug => "ack " . join (",", @msg_ids), "\n" if $self->{debug};
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
     #$ack->{msg_ids} = \@msg_ids;
@@ -717,6 +716,7 @@ sub resend
     my ($self, $id) = @_;
 
     if (exists $self->{_pending}{$id}){
+        AE::log trace => "resending $id";
         $self->send( $self->{_pending}{$id} );
     }
 }
@@ -732,6 +732,7 @@ sub invoke
     $self->{session}{seq} += 2 unless $is_service;
     $self->send($msg);
     $self->{_pending}{$msg->{msg_id}} = $msg unless $noack;
+    AE::log debug => "invoked $msg->{msg_id} (seq now is $self->{session}{seq})";
     return $msg->{msg_id};
 }
 
