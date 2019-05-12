@@ -22,7 +22,12 @@ For CLI application:
 For GUI application (currently minimal almost unusable quick & dirty proof-of-work):
 - Tcl
 - Tkx
-- a Tcl/Tk distribution for these two (out of the box in ActivePerl), see https://tkdocs.com/tutorial/install.html
+- a Tcl/Tk distribution for these two (out of the box in ActivePerl, else see https://tkdocs.com/tutorial/install.html), with following Tcl/Tk packages:
+  * Tclx
+  * BWidget
+  * Tktable
+  * treectrl
+  * tklib (ctext tooltip widget)
 
 Not yet used but discussed:
 - Template::Toolkit

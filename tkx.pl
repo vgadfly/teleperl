@@ -1,8 +1,12 @@
 #!/usr/bib/env perl5
 
+my $VERSION = 0.01;
+
 use Modern::Perl;
 use utf8;
 
+use Encode;
+use Carp;
 use Config::Tiny;
 use Storable qw( store retrieve freeze thaw );
 use Getopt::Long::Descriptive;
@@ -16,60 +20,46 @@ push @AnyEvent::REGISTRY, [Tkx => AnyEvTkx::]; # XXX currently pure-perl only
 
 use Telegram;
 
+use Telegram::Messages::GetDialogs;
+use Telegram::InputPeer;
+use Telegram::Messages::GetHistory;
+
 use Data::Dumper;
 
 sub option_spec {
-    [ 'verbose|v'   => 'be verbose'                         ],
-    [ 'noupdate!'   => 'pass noupdate to Telegram->new'     ],
-    [ 'debug!'      => 'pass debug to Telegram->new & AE'   ],
+    [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
+    [ 'noupdate!'   => 'pass noupdate to Telegram->new'                     ],
+    [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log'    ],
+    [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
+    [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
+    [ 'logfile|l=s' => 'path to log file', { default => "tkx.log" }         ],
 }
+
+### initialization
 
 my ($opts, $usage);
 
 eval { ($opts, $usage) = describe_options( '%c %o ...', option_spec() ) };
 die "Invalid opts: $@\nUsage: $usage\n" if $@;
 
-my $session = retrieve( 'session.dat' ) if -e 'session.dat';
-my $conf = Config::Tiny->read("teleperl.conf");
+my $session = retrieve( $opts->session ) if -e $opts->session;
+my $conf = Config::Tiny->read($opts->config);
 
 $Data::Dumper::Indent = 1;
 $AnyEvent::Log::FILTER->level(
-    $opts->{debug} ? "trace" :
-        $opts->{verbose} ? "info" : "note");
-$AnyEvent::Log::LOG->fmt_cb(sub {
-    my ($time, $ctx, $lvl, $msg) = @_;
+    $opts->{debug} > 0 ? "trace" :
+        $opts->{debug} ? "debug" :
+            $opts->{verbose} ? "info" : "note"
+);
+$AnyEvent::Log::LOG->log_to_file($opts->logfile) if $opts->{logfile};
 
-    my $ts = POSIX::strftime("%H:%M:%S", localtime $time)
-           . sprintf ".%04d", 1e4 * ($time - int($time));
-
-    # XXX we need just timestamp! but AE has no cb for just time..
-    # XXX so copypaste rest from AnyEvent::Log
-    my $ct = " ";
-    my @res;
-
-    for (split /\n/, sprintf "%-5s %s: %s", $AnyEvent::Log::LEVEL2STR[$_[2]], $_[1][0], $_[3]) {
-        push @res, "$ts$ct$_\n";
-        $ct = " + ";
-    }
-
-    join "", @res
-
-});
-
-my $mw = Tkx::widget->new(".");
-
-my $log = $mw->new_tk__text(-state => "disabled", -width => 99, -height => 43, -wrap => "none");
-$log->g_grid;
-
-sub writeToLog {
-    my ($msg) = @_;
-    my $numlines = $log->index("end - 1 line");
-    $log->configure(-state => "normal");
-    if ($numlines==43) {$log->delete("1.0", "2.0");}
-    if ($log->index("end-1c")!="1.0") {$log->insert_end("\n");}
-    $log->insert_end($msg);
-    $log->configure(-state => "disabled");
-}
+# catch all non-our Perl's warns to log with stack trace
+# we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
+$SIG{__WARN__} = sub {
+    scalar( grep /AnyEvent|log/, map { (caller($_))[0..3] } (1..4) )
+        ? warn $_[0]
+        : AE::log warn => &Carp::longmess;
+};
 
 my $tg = Telegram->new(
     dc => $conf->{dc},
@@ -85,6 +75,401 @@ $tg->{on_update} = sub {
     report_update(@_);
 };
 
+### create GUI widgets & it's callbacks
+
+Tkx::package_require("style");  # able to look modern
+#Tkx::style__use("as", -priority => 70); # TODO what is it? discover later
+Tkx::option_add("*tearOff", 0); # disable detachable GTK/Motif menus
+# use available in ActivePerl's tkkit.dll packages, but not all for now
+# e.g.: json ico img::xpm - do we need these?
+Tkx::package_require($_)
+    for qw(Tclx BWidget Tktable treectrl img::jpeg img::png);
+Tkx::package_require($_) for qw(ctext tooltip widget);# other available in tklib
+
+## global vars
+my %UI;                 # container for all Tk widgets
+my $statusText = 'This is somewhat like a status bar';
+my $cbReplyTo  = 0;     # value of 'Reply to selected msg' checkbox
+my $pbValue    = 0;     # current value of progress bar
+my $sbLimit    = 10;    # value of Limit spinbox
+my $msgToSend = '';     # text in entry
+my $curNicklistId = 0;  # id of what is selected in listbox
+my $lboxNicks = '{Surprised to see nick list on right?} {LOL} {This is old tradition in IRC and Jabber}';
+
+## create widgets
+$UI{mw}         = Tkx::widget->new("."); # main window
+
+# top and bottom labels & btns
+$UI{lblToolbar} = $UI{mw}->new_ttk__label( -text => "Here planned to be toolbar :)");
+$UI{sbLimit}    = $UI{mw}->new_tk__spinbox(-from => 1, -to => 9999, -width => 4, -textvariable => \$sbLimit);
+$UI{btGetHistor}= $UI{mw}->new_ttk__button(-text => "Get History", -command => \&btGetHistor);
+$UI{btGetDlgs}  = $UI{mw}->new_ttk__button(-text => "Get dialogs", -command => \&btGetDlgs);
+$UI{btCachUsers}= $UI{mw}->new_ttk__button(-text => "Cached users", -command => \&btCachUsers);
+$UI{btCachChats}= $UI{mw}->new_ttk__button(-text => "Cached Chats", -command => \&btCachChats);
+$UI{cbReplyTo}  = $UI{mw}->new_ttk__checkbutton(-variable => \$cbReplyTo, -onvalue => 1, -offvalue => 0,
+                        -text => "Reply to selected message");
+$UI{pbCountDone}= $UI{mw}->new_ttk__progressbar(-length => 200, -mode => 'determinate', -variable => \$pbValue);
+$UI{lblSendMsg} = $UI{mw}->new_ttk__label( -text => "Enter message:");
+$UI{enSendMsg}  = $UI{mw}->new_ttk__entry(-width => 80, -textvariable => \$msgToSend);
+$UI{btSendMsg}  = $UI{mw}->new_ttk__button(-text => "Send message", -command => \&btSendMsg);
+$UI{lblStatus}  = $UI{mw}->new_ttk__label(-width => 170, -textvariable => \$statusText, -anchor => "w");
+$UI{sizeGrip}   = $UI{mw}->new_ttk__sizegrip;
+
+# parts in frames
+$UI{panw}       = $UI{mw}->new_ttk__panedwindow(-orient => 'horizontal');
+$UI{frmNicklist}= $UI{panw}->new_ttk__frame();
+$UI{frmUpdates} = $UI{panw}->new_ttk__frame();
+$UI{frmMessages}= $UI{panw}->new_ttk__frame();
+$UI{txtUpdates} = $UI{frmUpdates}->new_tk__text(-state => "disabled", -width => 99, -height => 43, -wrap => "char");
+$UI{sbhUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "xview"], -orient => "horizontal");
+$UI{sbvUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "yview"], -orient => "vertical");
+$UI{lbNicklist} = $UI{frmNicklist}->new_tk__listbox(-listvariable => \$lboxNicks, -height => 43);
+$UI{sbhNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "xview"], -orient => "horizontal");
+$UI{sbvNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "yview"], -orient => "vertical");
+$UI{panw}->add($UI{frmUpdates}, -weight => 4);
+$UI{panw}->add($UI{frmNicklist}, -weight => 3);
+$UI{txtUpdates}->configure(-xscrollcommand => [$UI{sbhUpdates}, 'set'],  -yscrollcommand => [$UI{sbvUpdates}, 'set']);
+$UI{lbNicklist}->configure(-xscrollcommand => [$UI{sbhNicklist}, 'set'], -yscrollcommand => [$UI{sbvNicklist}, 'set']);
+
+## place widgets / set up entire look
+
+# main window
+$UI{mw}->g_wm_title("Teleperl Tk GUI");
+$UI{mw}->g_wm_minsize(500, 200);
+
+$UI{lblToolbar}->g_grid( -column => 0, -row => 0, -columnspan => 2, -sticky => "nwes", -pady => 5, -padx => 5);
+$UI{sbLimit}->g_grid(    -column => 2, -row => 0, -sticky => "nes",  -pady => 5, -padx => 5);
+$UI{btGetHistor}->g_grid(-column => 3, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
+$UI{btCachUsers}->g_grid(-column => 4, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
+$UI{btCachChats}->g_grid(-column => 5, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
+$UI{btGetDlgs}->g_grid(  -column => 6, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
+$UI{cbReplyTo}->g_grid(  -column => 0, -row => 2, -columnspan => 2, -sticky => "nwes", -pady => 1, -padx => 5);
+$UI{pbCountDone}->g_grid(-column => 3, -row => 2, -columnspan => 4, -sticky => "nes",  -pady => 1, -padx => 5);
+$UI{lblSendMsg}->g_grid( -column => 0, -row => 3, -columnspan => 1, -sticky => "nwes", -pady => 5, -padx => 5);
+$UI{enSendMsg}->g_grid(  -column => 1, -row => 3, -columnspan => 5, -sticky => "nwes", -pady => 5, -padx => 5);
+$UI{btSendMsg}->g_grid(  -column => 6, -row => 3, -sticky => "nwes", -pady => 5, -padx => 5);
+
+$UI{panw}->g_grid(       -column => 0, -row => 1, -columnspan => 8, -sticky => "nwes", -pady => 1, -padx => 5);
+
+$UI{lblStatus}->g_grid(  -column => 0, -row => 4, -columnspan => 8, -sticky => "nwes", -padx => 1);
+$UI{sizeGrip}->g_grid(   -column => 7, -row => 4, -sticky => "es");
+
+# inside Updates frame
+$UI{txtUpdates}->g_grid( -column => 0, -row => 0, -sticky => "nwes");
+$UI{sbhUpdates}->g_grid( -column => 0, -row => 1, -sticky => "ews");
+$UI{sbvUpdates}->g_grid( -column => 1, -row => 0, -sticky => "ens");
+$UI{frmUpdates}->g_grid_columnconfigure(0, -weight => 1);
+$UI{frmUpdates}->g_grid_rowconfigure(0, -weight => 1);
+
+# inside Nicklist frame
+$UI{lbNicklist}->g_grid( -column => 0, -row => 0, -sticky => "nwes");
+$UI{sbhNicklist}->g_grid(-column => 0, -row => 1, -sticky => "ews");
+$UI{sbvNicklist}->g_grid(-column => 1, -row => 0, -sticky => "ens");
+$UI{frmNicklist}->g_grid_columnconfigure(0, -weight => 1);
+$UI{frmNicklist}->g_grid_rowconfigure(0, -weight => 1);
+
+# all window
+$UI{mw}->g_grid_columnconfigure("all", -weight => 1);
+$UI{mw}->g_grid_columnconfigure(0, -weight => 0);
+$UI{mw}->g_grid_columnconfigure(7, -weight => 0);
+$UI{mw}->g_grid_rowconfigure(1, -weight => 1);
+
+## menus
+my $IS_AQUA = Tkx::tk_windowingsystem() eq "aqua"; # detect those pesky with Mac OS
+$UI{menubar}    = $UI{mw}->new_menu;
+$UI{menuFile}   = $UI{menubar}->new_menu;
+$UI{menuSet}    = $UI{menubar}->new_menu;
+$UI{menuSetDbg} = $UI{menuSet}->new_menu;
+$UI{menubar}->add_cascade(-menu => $UI{menuFile}, -label => "File");
+$UI{menubar}->add_cascade(-menu => $UI{menuSet}, -label => "Set");
+$UI{menuFile}->add_command(-label => "Save '$opts->{session}'", -command => \&save_session);
+$UI{menuFile}->add_command(-label => "Exit", -underline => 1, -command => [\&Tkx::destroy, $UI{mw}]) unless $IS_AQUA;
+$UI{menuSet}->add_checkbutton(-label => "Verbose", -variable => \$opts->{verbose}, -onvalue => 1, -offvalue => 0);
+$UI{menuSet}->add_separator;
+$UI{menuSet}->add_cascade(-menu => $UI{menuSetDbg}, -label => "Debug");
+$UI{menuSetDbg}->add_radiobutton(-label => "Off",   -variable => \$opts->{debug}, -value => 0, -command => \&set_debug);
+$UI{menuSetDbg}->add_radiobutton(-label => "Debug", -variable => \$opts->{debug}, -value => 1, -command => \&set_debug);
+$UI{menuSetDbg}->add_radiobutton(-label => "Trace", -variable => \$opts->{debug}, -value => 2, -command => \&set_debug);
+
+# those backyard Different platform...
+{
+    # NOTE these must be added after usual menus
+    my $help = $UI{menubar}->new_menu(-name => "help"); # XXX check it really last on X11, _mpath?
+    $UI{menubar}->add_cascade(-label => "Help", -underline => 0, -menu => $help);
+    $help->add_command(-label => "\u$0 Manual", -command => sub { $statusText = "What? Ask Durov for it!";});
+    my $about_menu = $help;
+    if ($IS_AQUA) {
+        # On Mac OS we want about box to appear in the application
+        # menu.  Anything added to a menu with the name "apple" will
+        # appear in this menu.
+        $about_menu = $UI{menubar}->new_menu(-name => "apple");
+        $UI{menubar}->add_cascade(-menu => $about_menu);
+        # XXX need we '.window' menu for them?
+    }
+    $about_menu->add_command(-label => "About \u$0", -command => \&about);
+
+    if ($^O eq 'MSWin32') {
+        my $system = Tkx::widget->new(Tkx::menu($UI{menubar}->_mpath . ".system"));
+        $UI{menubar}->add_cascade(-menu => $system);
+        $system->add_command(-label => "foo bar", -command => sub { $statusText = "Yay!"; });
+    }
+
+}
+
+# must be last to ".apple" work
+$UI{mw}->configure(-menu => $UI{menubar});
+
+## popup menu
+$UI{menuPopup}  = $UI{mw}->new_menu();
+$UI{menuPopup}->add_command(-label => $_) foreach qw(One Two Three);
+if (Tkx::tk_windowingsystem() eq "aqua") {
+    $UI{mw}->g_bind("<2>", [sub {my($x,$y) = @_; $UI{menuPopup}->g_tk___popup($x,$y)}, Tkx::Ev("%X", "%Y")] );
+    $UI{mw}->g_bind("<Control-1>", [sub {my($x,$y) = @_; $UI{menuPopup}->g_tk___popup($x,$y)}, Tkx::Ev("%X", "%Y")]);
+} else {
+    $UI{mw}->g_bind("<3>", [sub {my($x,$y) = @_; $UI{menuPopup}->g_tk___popup($x,$y)}, Tkx::Ev("%X", "%Y")]);
+}
+
+## other event dispatching
+$UI{mw}->g_bind("<Return>", \&btSendMsg);
+$UI{lbNicklist}->g_bind("<<ListboxSelect>>", \&onNicklistSelect);
+
+### GUI subs
+
+sub btGetDlgs {
+    $UI{lbNicklist}->delete(0, 'end');
+    AE::log info => "btGetDlgs: invoke";
+    $tg->invoke(
+        Telegram::Messages::GetDialogs->new(
+            offset_id => 0,
+            offset_date => 0,
+            offset_peer => Telegram::InputPeerEmpty->new,
+            limit => -1
+        ),
+        sub {
+            handle_dialogs(0, @_)
+        }
+    );
+    $UI{btGetDlgs}->state("disabled");
+    Tkx::after(5000, sub { $UI{btGetDlgs}->state("!disabled") });
+}
+
+sub btGetHistor {
+    $statusText="No ID for listbox item", return unless $curNicklistId;
+
+    my $peer = $tg->peer_from_id($curNicklistId);
+    $UI{pbCountDone}->configure(-maximum => $sbLimit);
+    $pbValue = 0;
+
+    AE::log info => "btGetHistor: invoke $sbLimit on $curNicklistId";
+    $tg->invoke( Telegram::Messages::GetHistory->new(
+            peer => $peer,
+            offset_id	=> 0,
+            offset_date	=> 0,
+            add_offset	=> 0,
+            limit	=> $sbLimit,
+            max_id	=> 0,
+            min_id	=> 0,
+            hash => 0
+        ), sub {
+            handle_history($peer, $_[0], $sbLimit) if $_[0]->isa('Telegram::Messages::MessagesABC');
+        } );
+    $UI{btGetHistor}->state("disabled");
+}
+
+sub btCachUsers {
+    $UI{lbNicklist}->delete(0, 'end');
+    my $cache = $tg->{session}{users};
+    $UI{lbNicklist}->insert(0,
+        sort map {
+            defined $cache->{$_}{username}
+                ? '@'. $cache->{$_}{username}
+                : $_
+        } keys %$cache
+    );
+}
+
+sub btCachChats {
+    $UI{lbNicklist}->delete(0, 'end');
+    my $cache = $tg->{session}{chats};
+    $UI{lbNicklist}->insert(0,
+        sort map {
+            defined $cache->{$_}{username}
+                ? '@'. $cache->{$_}{username}
+                : $_
+        } keys %$cache
+    );
+}
+
+sub btSendMsg {
+    $statusText="No ID for listbox item", return unless $curNicklistId;
+
+    $tg->send_text_message(
+        to => $curNicklistId,
+        message => encode_utf8($msgToSend),
+    );
+    $msgToSend = '';
+}
+
+sub onNicklistSelect {
+    my @idx = $UI{lbNicklist}->curselection;
+    return unless scalar @idx;
+    if ($#idx==0) {
+        my $val = $UI{lbNicklist}->get($idx[0]);
+        if ($val =~ /^@/) {
+            $curNicklistId = $tg->name_to_id($val);
+        } elsif ($val =~ /^([0-9]+) /) {
+            $curNicklistId = $tg->name_to_id($1);
+        }
+        $statusText = "Id for '$val' is $curNicklistId";
+    }
+    else {
+        $statusText = "multiple selection currently not handled";
+    }
+}
+
+sub set_debug {
+    $tg->{debug} = $opts->debug;
+    AE::log note => "set_debug now $tg->{debug}";
+}
+
+sub about {
+    Tkx::tk___messageBox(
+        -parent => $UI{mw},
+        -title => "About \u$0",
+        -type => "ok",
+        -icon => "info",
+        -message => "$0 v$VERSION\n" .
+                    "Copymiddle 2019 vgadfly & nuclight\n" .
+                    "All rights reversed.",
+    );
+}
+
+### semi-GUI subs
+
+sub handle_dialogs
+{
+    my ($count, $ds) = @_;
+    AE::log debug => "handle_dialogs $count";
+    if ($ds->isa('Telegram::Messages::DialogsABC')) {
+        my %users;
+        my %chats;
+        my $ipeer;
+
+        $tg->_cache_users(@{$ds->{users}});
+        $tg->_cache_chats(@{$ds->{chats}});
+        for my $u (@{$ds->{users}}) {
+            $users{$u->{id}} = $u;
+        }
+        for my $c (@{$ds->{chats}}) {
+            $chats{$c->{id}} = $c;
+        }
+        for my $d (@{$ds->{dialogs}}) {
+            $count++;
+            my $peer = $d->{peer};
+            if ($peer->isa('Telegram::PeerUser')) {
+                my $user_id = $peer->{user_id};
+                $peer = $users{$user_id};
+                $UI{lbNicklist}->insert('end',
+                    $peer->{username}
+                    ? '@'.$peer->{username}
+                    : "$user_id ".decode_utf8($peer->{first_name}//"")." ".decode_utf8($peer->{last_name} // "")
+                );
+                $ipeer = Telegram::InputPeerUser->new(
+                    user_id => $user_id,
+                    access_hash => $peer->{access_hash}
+                );
+            }
+            if ($peer->isa('Telegram::PeerChannel')) {
+                my $chan_id = $peer->{channel_id};
+                $peer = $chats{$chan_id};
+                $ipeer = Telegram::InputPeerChannel->new(
+                    channel_id => $chan_id,
+                    access_hash => $peer->{access_hash}
+                );
+                $UI{lbNicklist}->insert('end',
+                    $peer->{username}
+                    ? '@'.$peer->{username}
+                    : "$chan_id ".decode_utf8($peer->{title}//"")
+                );
+            }
+            if ($peer->isa('Telegram::PeerChat')){
+                my $chat_id = $peer->{chat_id};
+                $peer = $chats{$chat_id};
+                $ipeer = Telegram::InputPeerChat->new(
+                    chat_id => $chat_id,
+                );
+                $UI{lbNicklist}->insert('end', "$chat_id ".decode_utf8($peer->{title} // "")
+                );
+            }
+        }
+        if ($ds->isa('Telegram::Messages::DialogsSlice')) {
+            AE::log debug => "handle_dialogs: invoke? $count";
+            $tg->invoke(
+                Telegram::Messages::GetDialogs->new(
+                    offset_id => $ds->{messages}[-1]{id},
+                    offset_date => $ds->{messages}[-1]{date},
+                    offset_peer => Telegram::InputPeerEmpty->new,
+                    #    offset_peer => $ipeer,
+                    limit => -1
+                ),
+                sub { handle_dialogs($count, @_) }
+            ) if ($count < $ds->{count});
+        }
+    }
+}
+
+sub handle_history
+{
+    my ($peer, $messages, $ptop, $left) = @_;
+    AE::log debug => "handle_history ptop$ptop left=$left";
+
+    my $top = 0;
+    $tg->_cache_users(@{$messages->{users}});
+    for my $upd (@{$messages->{messages}}) {
+        $top = $upd->{id};
+        $left--;
+        $pbValue++;
+        if ($upd->isa('Telegram::Message')) {
+            render_msg($upd);
+        }
+    }
+    if ($ptop == 0 or $top < $ptop && $left) {
+        AE::log debug => "handle_history: invoke $top, $left";
+        $tg->invoke( Telegram::Messages::GetHistory->new(
+                peer => $peer,
+                offset_id => $top,
+                offset_date	=> 0,
+                add_offset	=> 0,
+                limit	=> $left,
+                max_id	=> 0,
+                min_id	=> 0,
+                hash => 0
+            ), sub {
+                handle_history($peer, $_[0], $top, $left) if $_[0]->isa('Telegram::Messages::MessagesABC');
+            } );
+    }
+    else {
+        AE::log debug => "handle_history end left=$left pb=$pbValue";
+        Tkx::after(1000, sub { $pbValue = 0;});
+        $UI{btGetHistor}->state("!disabled");
+    }
+}
+
+sub writeToLog {
+    my ($log, $msg) = @_;
+    #my $numlines = $log->index("end - 1 line");
+    $log->configure(-state => "normal");
+    $log->insert_end("\n") if $log->index("end-1c") != "1.0";
+    $log->insert_end($msg);
+    $log->configure(-state => "disabled");
+}
+
+sub render {
+    writeToLog($UI{txtUpdates}, decode_utf8($_[0], Encode::WARN_ON_ERR|Encode::FB_PERLQQ));
+}
+
+### backend subs
+
 sub _format_time {
     my $ts = shift;
 
@@ -94,14 +479,11 @@ sub _format_time {
         localtime $ts);
 }
 
-sub render {
-    writeToLog(@_);
-}
-
 sub report_update
 {
     my ($upd) = @_;
 
+    AE::log info => "report_update";
     if ($upd->isa('MTProto::RpcError')) {
         render("\rRpcError $upd->{error_code}: $upd->{error_message}");
     }
@@ -121,6 +503,7 @@ sub render_msg {
     #@type Telegram::Message
     my $msg = shift;
 
+    AE::log info => "render_msg";
     my $v = $opts->{verbose};
 
     my $name = defined $msg->{from_id} ? $tg->peer_name($msg->{from_id}, 1) : '(noid)';
@@ -166,18 +549,22 @@ sub render_msg {
     $add .= "[reply_markup] "                                       if $msg->{reply_markup};
 
     my @t = localtime;
-    render("\r[rcvd " . join(":", map {"0"x(2-length).$_} reverse @t[0..2]) . "] "
+    render("[rcvd " . join(":", map {"0"x(2-length).$_} reverse @t[0..2]) . "] "
         . ($v ? "id=$msg->{id} ":"")
         . _format_time($msg->{date}) . " "
         . "$name$to: $add$msg->{message}\n"
     );
 }
 
-$AnyEvent::Log::LOG->log_cb(sub { writeToLog(@_); 1 });
+sub save_session {
+    AE::log note => "saving session file";
+    store( $tg->{session}, $opts->session );
+}
+
+### now let's start everything
+
 $tg->start;
 
-Tkx::after(3999, sub { writeToLog("it is " . AE::now) });
-Tkx::after(4999, sub { writeToLog($AnyEvent::VERBOSE ." " . AE::now) });
 Tkx::MainLoop();
-say "quittin..";
-store( $tg->{session}, 'session.dat' ); # not the best way to do it AFTER gui
+AE::log note => "quittin..";
+save_session();# not the best way to do it AFTER gui
