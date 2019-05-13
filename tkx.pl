@@ -94,7 +94,8 @@ my $pbValue    = 0;     # current value of progress bar
 my $sbLimit    = 10;    # value of Limit spinbox
 my $msgToSend = '';     # text in entry
 my $curNicklistId = 0;  # id of what is selected in listbox
-my $lboxNicks = '{Surprised to see nick list on right?} {LOL} {This is old tradition in IRC and Jabber}';
+my $lboxNicks = '{Surprised to see nick list on right?} LOL {This is old tradition in IRC and Jabber}';
+my $logScrollEnd = 1;   # keep scrolling on adding
 
 ## create widgets
 $UI{mw}         = Tkx::widget->new("."); # main window
@@ -120,15 +121,19 @@ $UI{panw}       = $UI{mw}->new_ttk__panedwindow(-orient => 'horizontal');
 $UI{frmNicklist}= $UI{panw}->new_ttk__frame();
 $UI{frmUpdates} = $UI{panw}->new_ttk__frame();
 $UI{frmMessages}= $UI{panw}->new_ttk__frame();
-$UI{txtUpdates} = $UI{frmUpdates}->new_tk__text(-state => "disabled", -width => 99, -height => 43, -wrap => "char");
+$UI{txtUpdates} = $UI{frmUpdates}->new_tk__text(-state => "disabled", -width => 39, -height => 43, -wrap => "char");
 $UI{sbhUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "xview"], -orient => "horizontal");
 $UI{sbvUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "yview"], -orient => "vertical");
+$UI{txtMessage} = $UI{frmMessages}->new_tk__text(-state => "disabled", -width => 80, -height => 43, -wrap => "word", -font => 'TkTextFont');
+$UI{sbvMessage} = $UI{frmMessages}->new_ttk__scrollbar(-command => [$UI{txtMessage}, "yview"], -orient => "vertical");
 $UI{lbNicklist} = $UI{frmNicklist}->new_tk__listbox(-listvariable => \$lboxNicks, -height => 43);
 $UI{sbhNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "xview"], -orient => "horizontal");
 $UI{sbvNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "yview"], -orient => "vertical");
-$UI{panw}->add($UI{frmUpdates}, -weight => 4);
+$UI{panw}->add($UI{frmUpdates}, -weight => 2);
+$UI{panw}->add($UI{frmMessages}, -weight => 4);
 $UI{panw}->add($UI{frmNicklist}, -weight => 3);
 $UI{txtUpdates}->configure(-xscrollcommand => [$UI{sbhUpdates}, 'set'],  -yscrollcommand => [$UI{sbvUpdates}, 'set']);
+$UI{txtMessage}->configure(-yscrollcommand => [$UI{sbvMessage}, 'set']);
 $UI{lbNicklist}->configure(-xscrollcommand => [$UI{sbhNicklist}, 'set'], -yscrollcommand => [$UI{sbvNicklist}, 'set']);
 
 ## place widgets / set up entire look
@@ -161,6 +166,14 @@ $UI{sbvUpdates}->g_grid( -column => 1, -row => 0, -sticky => "ens");
 $UI{frmUpdates}->g_grid_columnconfigure(0, -weight => 1);
 $UI{frmUpdates}->g_grid_rowconfigure(0, -weight => 1);
 
+# inside Messages frame
+$UI{txtMessage}->g_grid( -column => 0, -row => 0, -sticky => "nwes");
+$UI{sbvMessage}->g_grid( -column => 1, -row => 0, -sticky => "ens");
+$UI{frmMessages}->g_grid_columnconfigure(0, -weight => 1);
+$UI{frmMessages}->g_grid_rowconfigure(0, -weight => 1);
+
+presetup_tags($UI{txtMessage});
+
 # inside Nicklist frame
 $UI{lbNicklist}->g_grid( -column => 0, -row => 0, -sticky => "nwes");
 $UI{sbhNicklist}->g_grid(-column => 0, -row => 1, -sticky => "ews");
@@ -185,6 +198,7 @@ $UI{menubar}->add_cascade(-menu => $UI{menuSet}, -label => "Set");
 $UI{menuFile}->add_command(-label => "Save '$opts->{session}'", -command => \&save_session);
 $UI{menuFile}->add_command(-label => "Exit", -underline => 1, -command => [\&Tkx::destroy, $UI{mw}]) unless $IS_AQUA;
 $UI{menuSet}->add_checkbutton(-label => "Verbose", -variable => \$opts->{verbose}, -onvalue => 1, -offvalue => 0);
+$UI{menuSet}->add_checkbutton(-label => "Keep scrolling log to end", -variable => \$logScrollEnd);
 $UI{menuSet}->add_separator;
 $UI{menuSet}->add_cascade(-menu => $UI{menuSetDbg}, -label => "Debug");
 $UI{menuSetDbg}->add_radiobutton(-label => "Off",   -variable => \$opts->{debug}, -value => 0, -command => \&set_debug);
@@ -421,7 +435,7 @@ sub handle_dialogs
 sub handle_history
 {
     my ($peer, $messages, $ptop, $left) = @_;
-    AE::log debug => "handle_history ptop$ptop left=$left";
+    AE::log debug => "handle_history ptop$ptop left=".($left//"");
 
     my $top = 0;
     $tg->_cache_users(@{$messages->{users}});
@@ -461,6 +475,7 @@ sub writeToLog {
     $log->configure(-state => "normal");
     $log->insert_end("\n") if $log->index("end-1c") != "1.0";
     $log->insert_end($msg);
+    $log->see("end") if $logScrollEnd;
     $log->configure(-state => "disabled");
 }
 
@@ -468,7 +483,246 @@ sub render {
     writeToLog($UI{txtUpdates}, decode_utf8($_[0], Encode::WARN_ON_ERR|Encode::FB_PERLQQ));
 }
 
+sub presetup_tags {
+    my $text = shift;   # widget
+
+    $text->tag_configure('Telegram::MessageEntityMention',      -foreground => 'red', );
+    $text->tag_configure('Telegram::MessageEntityHashtag',      -foreground => 'green', );
+    $text->tag_configure('Telegram::MessageEntityBotCommand',   -foreground => 'yellow', );
+    $text->tag_configure('Telegram::MessageEntityUrl',          -foreground => 'blue', -underline => 1);
+    $text->tag_configure('Telegram::MessageEntityTextUrl',      -foreground => 'blue', -underline => 1);#url
+    $text->tag_configure('Telegram::TextUrl',                   -foreground => 'blue', -underline => 1);#url webpage_id 
+    $text->tag_configure('Telegram::MessageEntityEmail',        -foreground => 'blue',);
+    $text->tag_configure('Telegram::TextEmail',                 -foreground => 'blue',); # email
+    $text->tag_configure('Telegram::MessageEntityBold',         -font => "-weight bold");
+    $text->tag_configure('Telegram::TextBold;',                 -font => "-weight bold");
+    $text->tag_configure('Telegram::MessageEntityItalic',       -font => "-slant italic");
+    $text->tag_configure('Telegram::TextItalic',                -font => "-slant italic");
+    $text->tag_configure('Telegram::TextUnderline',             -underline => 1);
+    $text->tag_configure('Telegram::TextStrike',                -overstrike=> 1);
+    $text->tag_configure('Telegram::MessageEntityCode',         -foreground => 'red', -font => 'TkFixedFont');
+    $text->tag_configure('Telegram::MessageEntityPre',          -font => 'TkFixedFont', ); # language
+    $text->tag_configure('Telegram::TextFixed',                 -font => 'TkFixedFont', );
+    $text->tag_configure('Telegram::MessageEntityMentionName',  -foreground => 'brown', ); # user_id
+    $text->tag_configure('Telegram::InputMessageEntityMentionName', -foreground => '#8e68c9', ); # user_id
+    $text->tag_configure('Telegram::MessageEntityPhone',        -foreground => '#69e34b', );
+    $text->tag_configure('Telegram::MessageEntityCashtag',      -foreground => '#4e743f', );
+    $text->tag_configure('Title',                               -font => "Helvetica 18 bold", );
+    $text->tag_configure('Caption',                             -font => 'TkCaptionFont', );
+    $text->tag_configure('Subtitle',                            -font => "Helvetica 16", );
+    $text->tag_configure('Header',                              -font => "Helvetica 14 bold", );
+    $text->tag_configure('Subheader',                           -font => "-weight bold", );
+    $text->tag_configure('Paragraph',                           -font => "", );
+    $text->tag_configure('Preformatted',                        -font => 'TkFixedFont', );
+    $text->tag_configure('Footer',                              -font => 'TkSmallCaptionFont', );
+}
+
+sub render_msg {
+    #@type Telegram::Message
+    my $msg = shift;
+
+    render_msg_console($msg);
+
+    $UI{txtMessage}->configure(-state => "normal");
+    $UI{txtMessage}->delete("1.0", "end");
+
+    $UI{txtMessage}->insert_end(decode_utf8($msg->{message}, Encode::WARN_ON_ERR|Encode::FB_PERLQQ));
+
+    if (exists $msg->{entities}) {
+        foreach (@{ $msg->{entities} }) {
+            $UI{txtMessage}->tag_add(
+                ref $_,
+                "1.0+" . $_->{offset} . "chars",
+                "1.0+" . ($_->{offset} + $_->{length}) . "chars"
+            );
+        }
+    }
+
+    if (exists $msg->{media}) {
+        my $sep = $UI{txtMessage}->new_ttk__separator(-orient => 'horizontal');
+        $UI{txtMessage}->insert_end("\n");
+        $UI{txtMessage}->window_create("end", -window => $sep); # FIXME need more geometry
+        $UI{txtMessage}->insert_end("\n" . ref $msg->{media});
+
+        if ($msg->{media}->isa('Telegram::MessageMediaWebPage')) {
+            my $webpage = $msg->{media}->{webpage};
+
+            if ($webpage->isa('Telegram::WebPage')) {
+                for (qw/id type hash embed_width embed_height duration 
+                    url site_name display_url description embed_url embed_type author/) {
+                    if (defined $webpage->{$_}) {
+                        $UI{txtMessage}->insert_end("\n$_:\t", "Telegram::MessageEntityBold");
+                        $UI{txtMessage}->insert_end(decode_utf8($webpage->{$_}));
+                    }
+                }
+                handle_photo($UI{txtMessage}, $webpage->{photo}) if $webpage->{photo};
+                $UI{txtMessage}->insert_end(non_handled($webpage->{document}))
+                    if $webpage->{document}; # TODO
+                if (my $iv = $webpage->{cached_page}) {
+                    if ($iv->isa('Telegram::PageABC')) {
+                        for my $block (@{ $iv->{blocks} }) {
+                            if ($block->isa('Telegram::PageBlockABC')) {
+                                handle_pageblock($UI{txtMessage}, $block, $iv->{photos});
+                            }
+                            else {
+                                $UI{txtMessage}->insert_end(non_handled($block));
+                            }
+                        }
+                        handle_photo($UI{txtMessage}, $_) for @{ $iv->{photos} }; # XXX
+                        $UI{txtMessage}->insert_end(non_handled($_)) for @{ $iv->{documents} }; # TODO
+                    }
+                    else {
+                        $UI{txtMessage}->insert_end("\nhas Instant View (not handled yet) ". ref $iv);
+                    }
+                }
+            }
+            else {
+                $UI{txtMessage}->insert_end(non_handled($webpage));
+            }
+        }
+    }
+
+    $UI{txtMessage}->configure(-state => "disabled");
+}
+
+sub handle_photo {
+    my ($tw, $photo) = @_;
+
+    warn "not photo or empty", return unless $photo->isa('Telegram::Photo');
+
+    $tw->insert_end("\nPhoto: id=" . $photo->{id} . ($photo->{has_stickers} ? "[stickers]" : "")." ". _format_time($photo->{date}));
+
+    for my $ps (@{ $photo->{sizes} }) {
+        warn "non PhotoSize", next unless $ps->isa('Telegram::PhotoSizeABC');
+        if ($ps->isa('Telegram::PhotoCachedSize') && $ps->{bytes}) {
+            my $imgid = "pcs$photo->{id}";
+            AE::log info => "creating image $imgid";
+            Tkx::image_create_photo($imgid, -data => $ps->{bytes});
+            $tw->image_create("end", -image => $imgid);
+        }
+        else {
+            $tw->insert_end(non_handled($ps));
+        }
+    }
+}
+
+sub handle_richtext {
+    my ($tw, $rtext, @tags) = @_;
+
+    if ($rtext->isa('Telegram::TextPlain')) {
+        $tw->insert_end(decode_utf8($rtext->{text}), (@tags ? join(' ', @tags) : ()));
+    }
+    elsif ($rtext->isa('Telegram::TextEmpty')) {
+        return;
+    }
+    elsif ($rtext->isa('Telegram::TextConcat')) {
+        handle_richtext($tw, $_, @tags) for @{ $rtext->{texts} };
+        return;
+    }
+    else {
+        handle_richtext($tw, $rtext->{text}, (@tags, ref($rtext)));
+    }
+}
+
+sub handle_pageblock {
+    my ($tw, $block, $photos) = @_;
+
+    $tw->insert_end("\n");
+
+    my $btype = ref $block;
+    $btype =~ s/^Telegram::PageBlock//;
+
+    my %actions = (
+        Unsupported => sub { $tw->insert_end("[Unsupported]\n"); },
+        Title       => 'text',
+        Subtitle    => 'text',
+        Header      => 'text',
+        Subheader   => 'text',
+        Paragraph   => 'text',
+        Preformatted=> 'text', # XXX language
+        Footer      => 'text',
+        AuthorDate => sub {
+            handle_richtext($block->{author});
+             $tw->insert_end(_format_time($block->{published_date}) . "\n");
+        },
+        Divider     => sub {
+            my $sep = $tw->new_ttk__separator(-orient => 'horizontal');
+            $tw->insert_end("\n");
+            $tw->window_create("end", -window => $sep); # FIXME need more geometry
+            $tw->insert_end("\n");
+        },
+        Anchor      => sub { AE::log info => "anchor ".$block->{name} }, # FIXME
+        List => sub {
+            my $i = 0;
+            for (@{ $block->{items} }) {
+                $tw->insert_end($block->{ordered} ? $i++ . ". " : "* "); # FIXME Unicode bullet
+                handle_richtext($tw, $_);
+            }
+        },
+        Blockquote  => sub {
+            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_richtext($tw, $block->{text}, 'Blockquote');
+        },
+        Pullquote   => sub {
+            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_richtext($tw, $block->{text}, 'Pullquote');
+        },
+        Photo   => sub {
+            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_photo($tw, grep { $_->{id} == $block->{photo_id} } @$photos);
+        },
+        Audio   => sub {
+            handle_richtext($tw, $block->{caption}, 'Caption');
+            $tw->insert_end("[Audio id=$block->{audio_id}]");
+        },
+        Video   => sub {
+            handle_richtext($tw, $block->{caption}, 'Caption');
+            $tw->insert_end("[Video id=$block->{video_id}]");
+        },
+        Cover   => sub {
+            handle_pageblock($tw, $block->{cover}, $photos);
+        },
+        Collage => sub {
+            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_pageblock($tw, $_, $photos) for @{ $block->{items} };
+        },
+        Slideshow => sub {
+            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_pageblock($tw, $_, $photos) for @{ $block->{items} };
+        },
+        Channel => sub {
+            my $id = $block->{channel}->isa('Telegram::PeerChannel')
+                ? $block->{channel}->{channel_id}
+                : $block->{channel}->{chat_id};
+            $tw->insert_end('@'.$tg->peer_name($tg->peer_from_id($id), 1), 'Telegram::TextUrl');
+        },
+    );
+
+    if (my $code = $actions{$btype}) {
+        if (ref $code eq 'CODE') {
+            &$code();
+        } else {
+            handle_richtext($tw, $block->{$code}, $btype);
+        }
+    }
+    else {
+        $tw->insert_end("[unhandled $btype ". non_handled($block) ."]\n");
+        warn "unhandled $btype";
+    }
+}
+
 ### backend subs
+
+sub non_handled ($) {
+    my $obj = shift;
+    my $class = ref($obj);
+    my $ret = "not handled $class";
+    no strict 'refs';
+    warn "non-fields", return $ret unless keys %{"$class\::FIELDS"};
+    $ret .= ":";
+    $ret = " $_=$obj->{$_}" for keys %{"$class\::FIELDS"};
+    return "$ret\n";
+}
 
 sub _format_time {
     my $ts = shift;
@@ -499,11 +753,11 @@ sub report_update
     }
 }
 
-sub render_msg {
+sub render_msg_console {
     #@type Telegram::Message
     my $msg = shift;
 
-    AE::log info => "render_msg";
+    AE::log info => "render_msg_console";
     my $v = $opts->{verbose};
 
     my $name = defined $msg->{from_id} ? $tg->peer_name($msg->{from_id}, 1) : '(noid)';
