@@ -332,6 +332,18 @@ sub _canonicalize_cmd {
     $_[1] = $command_name;
 }
 
+sub _getopt_conf {
+    my $cmd = shift;
+
+    my @conf = @{ $getopt_configuration->{getopt_conf} };
+    push @conf, $cmd->getopt_conf();
+
+    return {
+        %$getopt_configuration,
+        getopt_conf => [ @conf ],
+    };
+}
+
 sub _handle_global_app_options {
     my ($app) = @_;
 
@@ -475,7 +487,7 @@ sub run {
     $format = '%c '.$format unless $currently_interactive;          # (%c is command name -- irrelevant in interactive mode)
 
     eval { ($cmd_options, $cmd_usage) =
-        describe_options( $format, $command->option_spec, $getopt_configuration )
+        describe_options( $format, $command->option_spec, _getopt_conf($command) )
     };
     # (handle failed command options parsing)
     if( catch my $e ) {
@@ -889,7 +901,7 @@ sub _cmd_request_completions {
               local $SIG{__WARN__} = sub {};    # XXX __DIE__ too?
 
                 eval { ($cmd_opts, $cmd_usage) =
-                    describe_options( '...', $cmd->option_spec, $getopt_configuration )
+                    describe_options( '...', $cmd->option_spec, _getopt_conf($cmd) )
                 };
             }
 #print "mid=".join(':',@prefixARGV)."|\n";
@@ -975,8 +987,8 @@ sub _cmd_request_completions {
     }
 }
 
-# stolen from Getopt::Long::Descriptive
-my $SPEC_RE = qr{(?:[:=][\d\w\+]+[%@]?({\d*,\d*})?|[!+])$};
+# stolen from Getopt::Long::Descriptive and slightly fixed
+my $SPEC_RE = qr{(?:[:=][\d\w\+]+[%@]?({\d*(,\d*)?})?|[!+])$};
 
 sub _opt_names {
     my @opts = ();

@@ -203,7 +203,8 @@ sub dispatch {
         @ARGV = @args;
         my $format = $cmd->name().' '.$subcommand->name().' %o ...';
         eval { ($subcmd_opts, $subcmd_usage) =
-            describe_options( $format, $subcommand->option_spec() )
+            describe_options( $format, $subcommand->option_spec(),
+                CLI::Framework::Application::_getopt_conf($subcommand) )
         };
         if( catch my $e ) { # (subcommand failed options parsing)
             $e->isa( 'CLI::Framework::Exception' ) && do{ $e->rethrow };
@@ -287,6 +288,8 @@ sub name {
     my @pkg_parts = split /::/, $pkg;
     return lc $pkg_parts[-1];
 }
+
+sub getopt_conf { }
 
 sub option_spec { ( ) }
 
@@ -593,6 +596,16 @@ descriptions of each option:
 
 Subclasses should override this method if commands accept options (otherwise,
 the command will not recognize any options).
+
+=head2 getopt_conf()
+
+Returns list of words for L<Getopt::Long::Configure>, to be used in
+addition to standard CLIF ones.
+
+Subclasses should override this method only when something uncommon is needed,
+e.g. to allow repeated specs like '=s@{3} one could use:
+
+    sub getopt_conf { qw(no_bundling) }
 
 =head2 subcommand_alias()
 

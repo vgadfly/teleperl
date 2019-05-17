@@ -11,6 +11,7 @@ use List::Util qw(pairs pairkeys pairvalues);
 use Config::Tiny;
 use Storable qw( store retrieve freeze thaw );
 use Getopt::Long::Descriptive;
+use Class::Inspector;
 
 use Tkx;
 
@@ -24,6 +25,8 @@ use Telegram;
 use Telegram::Messages::GetDialogs;
 use Telegram::InputPeer;
 use Telegram::Messages::GetHistory;
+use Telegram::Messages::ReadHistory;
+use Telegram::Channels::ReadHistory;
 
 use Data::Dumper;
 
@@ -146,6 +149,7 @@ $UI{btCachUsers}= $UI{mw}->new_ttk__button(-text => "Cached users", -command => 
 $UI{btCachChats}= $UI{mw}->new_ttk__button(-text => "Cached Chats", -command => \&btCachChats);
 $UI{cbReplyTo}  = $UI{mw}->new_ttk__checkbutton(-variable => \$cbReplyTo, -onvalue => 1, -offvalue => 0,
                         -text => "Reply to selected message");
+$UI{btMarkRead} = $UI{mw}->new_ttk__button(-text => "Mark read up to selected or all", -command => \&btMarkRead);
 $UI{pbCountDone}= $UI{mw}->new_ttk__progressbar(-length => 200, -mode => 'determinate', -variable => \$pbValue);
 $UI{lblSendMsg} = $UI{mw}->new_ttk__label( -text => "Enter message:");
 $UI{enSendMsg}  = $UI{mw}->new_ttk__entry(-width => 80, -textvariable => \$msgToSend);
@@ -194,7 +198,8 @@ $UI{btCachUsers}->g_grid(-column => 4, -row => 0, -sticky => "nwes", -pady => 5,
 $UI{btCachChats}->g_grid(-column => 5, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{btGetDlgs}->g_grid(  -column => 6, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{cbReplyTo}->g_grid(  -column => 0, -row => 2, -columnspan => 2, -sticky => "nwes", -pady => 1, -padx => 5);
-$UI{pbCountDone}->g_grid(-column => 3, -row => 2, -columnspan => 4, -sticky => "nes",  -pady => 1, -padx => 5);
+$UI{btMarkRead}->g_grid( -column => 3, -row => 2, -sticky => "nwes", -pady => 1, -padx => 5);
+$UI{pbCountDone}->g_grid(-column => 4, -row => 2, -columnspan => 3, -sticky => "nes",  -pady => 1, -padx => 5);
 $UI{lblSendMsg}->g_grid( -column => 0, -row => 3, -columnspan => 1, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{enSendMsg}->g_grid(  -column => 1, -row => 3, -columnspan => 5, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{btSendMsg}->g_grid(  -column => 6, -row => 3, -sticky => "nwes", -pady => 5, -padx => 5);
@@ -397,6 +402,25 @@ sub btSendMsg {
         ($cbReplyTo ? (reply_to_msg_id => $curSelMsgId) : ()),
     );
     $msgToSend = '';
+}
+
+sub btMarkRead {
+    $statusText="No ID for listbox item", return unless $curNicklistId;
+
+    my $peer = $tg->peer_from_id($curNicklistId);
+
+    if ($peer->isa('Telegram::InputPeerChannel')) {
+        $tg->invoke( Telegram::Channels::ReadHistory->new(
+                channel => $peer,
+                max_id => $curSelMsgId // 0,
+        ), sub { render(Dumper @_) } );
+    }
+    else {
+        $tg->invoke( Telegram::Messages::ReadHistory->new(
+                peer => $peer,
+                max_id => $curSelMsgId // 0,
+        ), sub { render(Dumper @_) } );
+    }
 }
 
 sub onNicklistSelect {
