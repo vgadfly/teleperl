@@ -699,11 +699,15 @@ sub get_messages
 sub send_text_message
 {
     my ($self, %arg) = @_;
-    my $msg = Telegram::Messages::SendMessage->new;
+    my $msg = Telegram::Messages::SendMessage->new(
+        map {
+            $arg{$_} ? ( $_ => $arg{$_} ) : ()
+        } qw(no_webpage silent background clear_draft reply_to_msg_id)
+    );
     my $users = $self->{session}{users};
     my $chats = $self->{session}{chats};
 
-    $msg->{message} = $arg{message};
+    $msg->{message} = $arg{message};    # TODO check utf8
     $msg->{random_id} = int(rand(65536));
 
     my $peer;
@@ -747,6 +751,7 @@ sub _cache_users
             first_name => $user->{first_name},
             last_name => $user->{last_name}
         };
+        $self->{session}{self_id} = $user->{id} if $user->{self};
     }
 }
 
