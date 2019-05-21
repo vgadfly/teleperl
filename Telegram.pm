@@ -699,10 +699,11 @@ sub get_messages
 sub send_text_message
 {
     my ($self, %arg) = @_;
+
     my $msg = Telegram::Messages::SendMessage->new(
         map {
             $arg{$_} ? ( $_ => $arg{$_} ) : ()
-        } qw(no_webpage silent background clear_draft reply_to_msg_id)
+        } qw(no_webpage silent background clear_draft reply_to_msg_id entities)
     );
     my $users = $self->{session}{users};
     my $chats = $self->{session}{chats};
