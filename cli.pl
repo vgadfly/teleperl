@@ -1,9 +1,9 @@
-#!/usr/bib/env perl5
+#!/usr/bin/env perl
 
 use Modern::Perl;
 
 use Storable qw(store);
-use Teleperl;
+use ClifTg;
 
 my $app = Teleperl->new;
 $app->set_default_command('console');
