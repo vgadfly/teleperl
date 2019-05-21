@@ -7,10 +7,11 @@ use utf8;
 
 use Encode ':all';
 use Carp;
-use List::Util qw(pairs pairkeys pairvalues);
+use List::Util qw(max pairs pairkeys pairvalues);
 use Config::Tiny;
 use Storable qw( store retrieve freeze thaw );
 use Getopt::Long::Descriptive;
+use Class::Inspector;
 
 use Tkx;
 
@@ -24,6 +25,8 @@ use Telegram;
 use Telegram::Messages::GetDialogs;
 use Telegram::InputPeer;
 use Telegram::Messages::GetHistory;
+use Telegram::Messages::ReadHistory;
+use Telegram::Channels::ReadHistory;
 
 use Data::Dumper;
 
@@ -34,6 +37,7 @@ sub option_spec {
     [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
     [ 'logfile|l=s' => 'path to log file', { default => "tkx.log" }         ],
+    [ 'theme=s'     => 'ttk::style theme to use'                            ],
 }
 
 ### initialization
@@ -112,8 +116,15 @@ $tg->{on_update} = sub {
 
 ### create GUI widgets & it's callbacks
 
-Tkx::package_require("style");  # able to look modern
+#Tkx::package_require("style");  # able to look modern TODO what's this?
 #Tkx::style__use("as", -priority => 70); # TODO what is it? discover later
+if ($opts->{theme}) {
+    eval {
+        Tkx::ttk__style_theme_use($opts->theme);
+    };
+    die $@ . "\nAvailable theme names: " . Tkx::ttk__style_theme_names() . "\n"
+        if $@;
+}
 Tkx::option_add("*tearOff", 0); # disable detachable GTK/Motif menus
 # use available in ActivePerl's tkkit.dll packages, but not all for now
 # e.g.: json ico img::xpm - do we need these?
@@ -146,6 +157,7 @@ $UI{btCachUsers}= $UI{mw}->new_ttk__button(-text => "Cached users", -command => 
 $UI{btCachChats}= $UI{mw}->new_ttk__button(-text => "Cached Chats", -command => \&btCachChats);
 $UI{cbReplyTo}  = $UI{mw}->new_ttk__checkbutton(-variable => \$cbReplyTo, -onvalue => 1, -offvalue => 0,
                         -text => "Reply to selected message");
+$UI{btMarkRead} = $UI{mw}->new_ttk__button(-text => "Mark read up to selected or all", -command => \&btMarkRead);
 $UI{pbCountDone}= $UI{mw}->new_ttk__progressbar(-length => 200, -mode => 'determinate', -variable => \$pbValue);
 $UI{lblSendMsg} = $UI{mw}->new_ttk__label( -text => "Enter message:");
 $UI{enSendMsg}  = $UI{mw}->new_ttk__entry(-width => 80, -textvariable => \$msgToSend);
@@ -194,7 +206,8 @@ $UI{btCachUsers}->g_grid(-column => 4, -row => 0, -sticky => "nwes", -pady => 5,
 $UI{btCachChats}->g_grid(-column => 5, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{btGetDlgs}->g_grid(  -column => 6, -row => 0, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{cbReplyTo}->g_grid(  -column => 0, -row => 2, -columnspan => 2, -sticky => "nwes", -pady => 1, -padx => 5);
-$UI{pbCountDone}->g_grid(-column => 3, -row => 2, -columnspan => 4, -sticky => "nes",  -pady => 1, -padx => 5);
+$UI{btMarkRead}->g_grid( -column => 3, -row => 2, -sticky => "nwes", -pady => 1, -padx => 5);
+$UI{pbCountDone}->g_grid(-column => 4, -row => 2, -columnspan => 3, -sticky => "nes",  -pady => 1, -padx => 5);
 $UI{lblSendMsg}->g_grid( -column => 0, -row => 3, -columnspan => 1, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{enSendMsg}->g_grid(  -column => 1, -row => 3, -columnspan => 5, -sticky => "nwes", -pady => 5, -padx => 5);
 $UI{btSendMsg}->g_grid(  -column => 6, -row => 3, -sticky => "nwes", -pady => 5, -padx => 5);
@@ -297,13 +310,13 @@ $UI{lbNicklist}->g_bind("<<ListboxSelect>>", \&onNicklistSelect);
 $UI{tvMsgList}->g_bind("<<TreeviewSelect>>", \&onMsgListSelect);
 
 # set tags for messages and their list
-$UI{tvMsgList}->tag_configure("out",            -background => "yellow");
+$UI{tvMsgList}->tag_configure("out",            -background => "lightyellow");
 $UI{tvMsgList}->tag_configure("mentioned",      -font => "-underline 1");
 $UI{tvMsgList}->tag_configure("silent",         -font => "-overstrike 1");
 $UI{tvMsgList}->tag_configure("MessageService", -foreground => "#a000a0");
 
 our @_columns = (
-    id              => [ [ -text => "ID" ],         [ -minwidth => 30, -width => 50 ], "%d" ],
+    id              => [ [ -text => "Msg ID" ],     [ -minwidth => 30, -width => 50 ], "%d" ],
     date            => [ [ -text => "Date/time"],   [ -minwidth => 50, -width => 89 ], \&_format_time, ],
     reply_to_msg_id => [ [ -text => "Reply to ID"], [ -minwidth => 30, -width => 50 ], "%d" ],
     from            => [ [ -text => "From" ],       [ -minwidth => 70, -width => 99 ], "%s" ],
@@ -397,6 +410,25 @@ sub btSendMsg {
         ($cbReplyTo ? (reply_to_msg_id => $curSelMsgId) : ()),
     );
     $msgToSend = '';
+}
+
+sub btMarkRead {
+    $statusText="No ID for listbox item", return unless $curNicklistId;
+
+    my $peer = $tg->peer_from_id($curNicklistId);
+
+    if ($peer->isa('Telegram::InputPeerChannel')) {
+        $tg->invoke( Telegram::Channels::ReadHistory->new(
+                channel => $peer,
+                max_id => $curSelMsgId // 0,
+        ), sub { render(Dumper @_) } );
+    }
+    else {
+        $tg->invoke( Telegram::Messages::ReadHistory->new(
+                peer => $peer,
+                max_id => $curSelMsgId // 0,
+        ), sub { render(Dumper @_) } );
+    }
 }
 
 sub onNicklistSelect {
@@ -592,8 +624,8 @@ sub presetup_tags {
     my $text = shift;   # widget
 
     $text->tag_configure('Telegram::MessageEntityMention',      -foreground => 'red', );
-    $text->tag_configure('Telegram::MessageEntityHashtag',      -foreground => 'green', );
-    $text->tag_configure('Telegram::MessageEntityBotCommand',   -foreground => 'yellow', );
+    $text->tag_configure('Telegram::MessageEntityHashtag',      -foreground => 'darkgreen', );
+    $text->tag_configure('Telegram::MessageEntityBotCommand',   -foreground => 'brown', );
     $text->tag_configure('Telegram::MessageEntityUrl',          -foreground => 'blue', -underline => 1);
     $text->tag_configure('Telegram::MessageEntityTextUrl',      -foreground => 'blue', -underline => 1);#url
     $text->tag_configure('Telegram::TextUrl',                   -foreground => 'blue', -underline => 1);#url webpage_id 
@@ -621,15 +653,19 @@ sub presetup_tags {
     $text->tag_configure('Preformatted',                        -font => 'TkFixedFont', );
     $text->tag_configure('Footer',                              -font => 'TkSmallCaptionFont', );
     $text->tag_configure("MessageService",                      -background => "#a000a0");
+    $text->tag_configure("List",                                -lmargin2 => "5m", -tabs => "5m");
+    $text->tag_configure("Blockquote",                          -lmargin1 => "1c", -lmargin2 => "1c");
+    $text->tag_configure("out",                                 -background => "#f6fbed");
 }
 
 sub render_msg {
-    #@type Telegram::Message
+    #@type Telegram::MessageABC
     my $msg = shift;
 
     $UI{txtMessage}->configure(-state => "normal");
     $UI{txtMessage}->delete("1.0", "end");
 
+    # body
     $UI{txtMessage}->insert_end(
         $msg->isa('Telegram::MessageService')
         ? (_message_action($msg->{action}), "MessageService")
@@ -645,6 +681,12 @@ sub render_msg {
             );
         }
     }
+
+    # offsets for entities are done, now we can insert to beginning
+    $UI{txtMessage}->insert("1.0", "\n");   # for headers
+
+    # don't want for Instant View be on own message's background
+    $UI{txtMessage}->tag_add("out", "2.0", "end") if $msg->{out};
 
     if (exists $msg->{media}) {
         my $sep = $UI{txtMessage}->new_ttk__separator(-orient => 'horizontal');
@@ -664,7 +706,7 @@ sub render_msg {
                     }
                 }
                 handle_photo($UI{txtMessage}, $webpage->{photo}) if $webpage->{photo};
-                $UI{txtMessage}->insert_end(non_handled($webpage->{document}))
+                $UI{txtMessage}->insert_end(non_handled($webpage->{document})."\n")
                     if $webpage->{document}; # TODO
                 if (my $iv = $webpage->{cached_page}) {
                     if ($iv->isa('Telegram::PageABC')) {
@@ -675,11 +717,11 @@ sub render_msg {
                                 handle_pageblock($UI{txtMessage}, $block, $photos);
                             }
                             else {
-                                $UI{txtMessage}->insert_end(non_handled($block));
+                                $UI{txtMessage}->insert_end(non_handled($block)."\n");
                             }
                         }
-                        handle_photo($UI{txtMessage}, $_) for @{ $iv->{photos} }; # XXX
-                        $UI{txtMessage}->insert_end(non_handled($_)) for @{ $iv->{documents} }; # TODO
+                        $UI{txtMessage}->insert_end(non_handled($_)."\n")
+                            for @{ $iv->{documents} }; # TODO
                     }
                     else {
                         $UI{txtMessage}->insert_end("\nhas Instant View (not handled yet) type=". ref $iv);
@@ -687,9 +729,74 @@ sub render_msg {
                 }
             }
             else {
-                $UI{txtMessage}->insert_end(non_handled($webpage));
+                $UI{txtMessage}->insert_end(non_handled($webpage) . "\n");
             }
         }
+    }
+
+    if (exists $msg->{reply_markup}) {
+        my $rm = $msg->{reply_markup};
+        $UI{txtMessage}->insert_end("\n" . ref $rm);
+        AE::log debug => "reply_markup " . ref $rm;
+        # TODO working buttons FIXME geometry
+        if ($rm->isa('Telegram::ReplyKeyboardMarkup') or $rm->isa('Telegram::ReplyInlineMarkup')) {
+ #  local $Tkx::TRACE = 1;
+            my $tbl = $UI{txtMessage}->new_table(
+                -cache => 1,    # XXX not needed when widgets, but need for text
+                -rows => scalar @{ $rm->{rows} },
+                -cols => max(map { scalar @{ $_->{buttons} } } @{ $rm->{rows} }),
+                -rowheight      => 3,
+                -colwidth       => 30,
+                -colstretchmode => 'all',
+                -rowstretchmode => 'all',
+            );
+#            local $Data::Dumper::Indent = 0;
+            my $i = 0;
+            for my $row (@{ $rm->{rows} }) {
+                my $j = 0;
+                for my $rb (@{ $row->{buttons} }) {
+                    my $text = Dumper($rb);
+                    $text =~ s/[\$\{\}]//g;
+                    AE::log debug => "$i,$j $text";
+                    my $but = $tbl->new_ttk__button(-text => $text, -command => sub { render("pressed $text") });
+                    $tbl->window_configure("$i,$j", -window => $but, -padx => 2, -pady => 2);
+                    $j++;
+                }
+                $i++;
+            }
+        AE::log debug => $tbl->window_configure('0,0');
+
+            $UI{txtMessage}->insert_end("\n");
+            $UI{txtMessage}->window_create("end", -window => $tbl, -stretch => 1); # FIXME geometry
+        }
+    }
+
+    # we put headers here, last, to simplify offset/length applying for entities
+    # and do this in reverse order :)
+    foreach my $colspec (reverse pairs @_columns) {
+        my ($id, $spec) = @$colspec;
+        my $val = '';
+        next if $id eq 'from'; # XXX
+        if (exists $msg->{$id}) {    # NOTE both classes, action, too - not all keys avail
+            my $f = $spec->[2];
+            my $v = $msg->{$id};
+            my $hdr = { @{ $spec->[0] } }->{-text};
+            $val = dutf8( ref $f eq 'CODE' ? &$f($v) : sprintf($f, $v) );
+            $UI{txtMessage}->insert("1.0", "$hdr:\t", "Telegram::TextBold", $val . "\n", '{}');
+        }
+    }
+    my %hdrs = _get_from_to_where($msg);
+    for my $hdr (qw/from to where/) {
+        next if $hdr eq 'to' and not $hdrs{to_type} eq 'User';
+        $UI{txtMessage}->insert("1.0","\u$hdr:\t", "Telegram::TextBold",
+            sprintf("%s <%s%d%s>\n",
+                $hdrs{"$hdr\_name"},
+                $hdrs{"$hdr\_type"} // '',
+                $hdrs{"$hdr\_id"} // $hdrs{to_id},
+                $hdrs{"$hdr\_username"} // ''
+            ),
+            '{}'
+        );
     }
 
     $UI{txtMessage}->configure(-state => "disabled");
@@ -700,7 +807,7 @@ sub handle_photo {
 
     warn "not photo or empty", return unless $photo && $photo->isa('Telegram::Photo'); # XXX
 
-    $tw->insert_end("\nPhoto: id=" . $photo->{id} . ($photo->{has_stickers} ? "[stickers]" : "")." ". _format_time($photo->{date}));
+    $tw->insert_end("\nPhoto: id=" . $photo->{id} . ($photo->{has_stickers} ? "[stickers]" : "")." ". _format_time($photo->{date}) . "\n");
 
     for my $ps (@{ $photo->{sizes} }) {
         warn "non PhotoSize", next unless $ps->isa('Telegram::PhotoSizeABC');
@@ -711,7 +818,7 @@ sub handle_photo {
             $tw->image_create("end", -image => $imgid, -padx => 2, -pady => 2);
         }
         else {
-            $tw->insert_end(non_handled($ps));
+            $tw->insert_end("\t" . non_handled($ps) . "\n");
         }
     }
 }
@@ -761,12 +868,16 @@ sub handle_pageblock {
             $tw->window_create("end", -window => $sep, -stretch => 1) ; # FIXME need more geometry
             $tw->insert_end("\n");
         },
-        Anchor      => sub { AE::log info => "anchor ".$block->{name} }, # FIXME
+        Anchor      => sub {
+        # FIXME
+            AE::log info => "anchor ".$block->{name};
+            $tw->mark_set("anchor".$block->{name}, "insert");
+        },
         List => sub {
             my $i = 0;
             for (@{ $block->{items} }) {
-                $tw->insert_end("\n".($block->{ordered} ? $i++ . ". " : "\x{2022} "));
-                handle_richtext($tw, $_);
+                $tw->insert_end("\n".($block->{ordered} ? $i++ . ".\t" : "\x{2022}\t"));
+                handle_richtext($tw, $_, 'List');
             }
         },
         Blockquote  => sub {
@@ -818,7 +929,7 @@ sub handle_pageblock {
         }
     }
     else {
-        $tw->insert_end("[unhandled $btype ". non_handled($block) ."]\n");
+        $tw->insert_end("\n[unknown $btype " . non_handled($block) . "]\n");
         warn "unhandled $btype";
     }
 }
@@ -847,32 +958,9 @@ sub handle_msg {
 
     render_msg_console($msg);
 
-    my $to_id;
-    my $to = $msg->{to_id};
-    # FIXME XXX TODO instead fix Telegram::message_from_update ! for all this block!
-    $to = Telegram::PeerUser->new( user_id => $tg->{session}{self_id} )
-        unless $to;
-    my $to_type = ref $to;
-    $to_type =~ s/^Telegram::Peer//;
-    if (ref $to eq '' and $to =~ /^\d+$/) {
-        $to_type = 'Chat';
-        $to_id = $to;
-    }
-    elsif ($to->isa('Telegram::PeerChannel')) {
-        $to_id = $to->{channel_id};
-    } elsif ($to->isa('Telegram::PeerChat')) {
-        $to_id = $to->{chat_id};
-    } elsif ($to->isa('Telegram::PeerUser')) {
-        $to_id = $to->{user_id};
-    } else {
-        AE::log alert => Dumper($msg);
-        die 'unknown to_id ' . ref $to;
-    }
+    my %envelope = _get_from_to_where($msg);
 
     my ($id, $parent, $label, $textbegin);
-
-    my $to_name = dutf8($tg->peer_name($to_id));
-    my $from_name = defined $msg->{from_id} ? dutf8($tg->peer_name($msg->{from_id}, 1)) : '(noid)';
 
     # content part
     if ($msg->isa('Telegram::Message')) {
@@ -889,21 +977,15 @@ sub handle_msg {
     $textbegin =~ s/\n/ /g;
     $textbegin = '[media]' if $textbegin eq '' and exists $msg->{media};
 
-    AE::log debug => "$to_id '$to_name' '$from_name' $to_type txt=$textbegin";
+    AE::log trace => "@{[%envelope]} txt=$textbegin";
 
     # first, entry for dialog in tree if not exists yet
-    if ($to_type eq 'User' and not $msg->{out}) {
-        $id = $msg->{from_id};
-        $label = $from_name;
-    }
-    else {
-        $id = $to_id;
-        $label = $to_name;
-    }
-    $id = substr($to_type, 0, 4) . $id; # they are int, in theory collision possible
+    $id = $envelope{where_id};
+    $label = $envelope{where_name};
+    $id = substr($envelope{to_type}, 0, 4) . $id; # they are int, in theory collision possible
 
     AE::log debug => "id=$id dialabel=$label %s",
-    $UI{tvMsgList}->insert($to_type, "end", -id => $id, -text => $label)
+    $UI{tvMsgList}->insert($envelope{to_type}, "end", -id => $id, -text => $label)
         unless $UI{tvMsgList}->exists($id);
 
     # then, entry for message itself, if not exists yet - but handle edits, too
@@ -924,7 +1006,7 @@ sub handle_msg {
         my ($id, $spec) = @$colspec;
         my $val = '';
         if ($id eq 'from') { # XXX
-            $val = $to_type eq 'Channel' && !defined $msg->{from_id} ? $to_name : $from_name;
+            $val = $envelope{from_name};
         }
         elsif (exists $msg->{$id}) {    # NOTE both classes, action, too - not all keys avail
             my $f = $spec->[2];
@@ -949,7 +1031,7 @@ sub non_handled ($) {
     warn "non-fields", return $ret unless keys %{"$class\::FIELDS"};
     $ret .= ":";
     $ret .= " $_=$obj->{$_}" for keys %{"$class\::FIELDS"};
-    return "$ret\n";
+    return $ret;
 }
 
 sub dutf8 ($) { decode_utf8($_[0], Encode::WARN_ON_ERR|Encode::FB_PERLQQ) }
@@ -961,6 +1043,50 @@ sub _format_time {
     return POSIX::strftime(
         (AE::now - $ts < 86400) ? "%H:%M:%S" : "%Y.%m.%d %H:%M",
         localtime $ts);
+}
+
+sub _get_from_to_where {
+    my $msg = shift;
+
+    my %h;
+    my $to = $msg->{to_id};
+    # FIXME XXX TODO instead fix Telegram::message_from_update ! for all this sub!
+    $to = Telegram::PeerUser->new( user_id => $tg->{session}{self_id} )
+        unless $to;
+    $h{to_type} = ref $to;
+    $h{to_type} =~ s/^Telegram::Peer//;
+    if (ref $to eq '' and $to =~ /^\d+$/) {
+        $h{to_type} = 'Chat';
+        $h{to_id} = $to;
+    }
+    elsif ($to->isa('Telegram::PeerChannel')) {
+        $h{to_id} = $to->{channel_id};
+    } elsif ($to->isa('Telegram::PeerChat')) {
+        $h{to_id} = $to->{chat_id};
+    } elsif ($to->isa('Telegram::PeerUser')) {
+        $h{to_id} = $to->{user_id};
+    } else {
+        AE::log alert => Dumper($msg);
+        die 'unknown to_id ' . ref $to;
+    }
+    $h{to_name} = dutf8($tg->peer_name($h{to_id}));
+    $h{to_username} = $h{to_type} eq 'User'
+        ? $tg->{session}{users}{$h{to_id}}->{username}
+        : $tg->{session}{chats}{$h{to_id}}->{username};
+    $h{from_id} = $msg->{from_id};
+    $h{from_username} = $tg->{session}{users}{$h{from_id}}->{username} if defined $msg->{from_id};
+    $h{from_real} = defined $msg->{from_id} ? dutf8($tg->peer_name($msg->{from_id}, 1)) : '';
+    $h{from_name} = $h{to_type} eq 'Channel' && !defined $msg->{from_id} ? $h{to_name} : $h{from_real};
+
+    if ($h{to_type} eq 'User' and not $msg->{out}) {
+        $h{"where_".(split /_/)[1]} = $h{$_} for grep(/^from_/, keys %h);
+    }
+    else {
+        $h{"where_".(split /_/)[1]} = $h{$_} for grep(/^to_/, keys %h);
+    }
+    defined $h{$_} and $h{$_} = '@' . $h{$_} for grep(/_username/, keys %h); # XXX here or in consumer?
+
+    return %h;
 }
 
 sub _format_fwd_from {

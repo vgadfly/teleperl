@@ -7,7 +7,7 @@ use base "CLI::Framework";
 use Carp;
 use Config::Tiny;
 use Storable qw( store retrieve freeze thaw );
-use Encode;
+use Encode ':all';
 
 use AnyEvent::Impl::Perl;
 use AnyEvent;
@@ -76,6 +76,33 @@ sub init {
             ? warn $_[0]
             : AE::log warn => &Carp::longmess;
     };
+    # XXX workaround crutch of AE::log not handling utf8 & function name
+    {
+        no strict 'refs';
+        no warnings 'redefine';
+        *AnyEvent::log    = *AE::log    = sub ($$;@) {
+            AnyEvent::Log::_log
+              $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
+              $_[0],
+              map { is_utf8($_) ? encode_utf8 $_ : $_ } (
+                  ($opts->verbose
+                      ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
+                      : $_[1]),
+                   (@_ > 2 ? @_[2..$#_] : ())
+              );
+        };
+        *AnyEvent::logger = *AE::logger = sub ($;$) {
+            AnyEvent::Log::_logger
+              $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
+              $_[0],
+              map { is_utf8($_) ? encode_utf8 $_ : $_ } (
+                  ($opts->verbose
+                      ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
+                      : $_[1]),
+                   (@_ > 2 ? @_[2..$#_] : ())
+              );
+        };
+    }
 
     my $tg = Telegram->new(
         dc => $conf->{dc},
@@ -258,8 +285,33 @@ sub report_update
 package Teleperl::Command::Message;
 use base "CLI::Framework::Command";
 
+use Telegram::MessageEntity;
 use Encode qw/encode_utf8 decode_utf8/;
 use Data::Dumper;
+
+# do long scan once
+my $entpkgs = Class::Inspector->subclasses('Telegram::MessageEntityABC');
+my @_opts;
+for (grep(!/input/i, @$entpkgs)) {
+    my $e = $_;
+    no strict 'refs';
+    my @keys = sort keys %{"$e\::FIELDS"};
+    $e =~ s/Telegram::MessageEntity//;
+    $e = lc $e;
+    push @_opts, [ "entity-$e=s\@{".(scalar @keys).'}' => "required args @keys" ],
+}
+
+# XXX allow repeated like  '=s@{3}' here
+sub getopt_conf { qw(no_bundling) }
+
+sub option_spec {
+    [ "no_webpage!"      => "same named API param, default false"  ],
+    [ "silent!"          => "same named API param, default false"  ],
+    [ "background!"      => "same named API param, default false"  ],
+    [ "clear_draft!"     => "same named API param, default false"  ],
+    [ "reply_to_msg_id=i"=> "same named API param, default none"   ],
+    @_opts,
+}
 
 sub complete_arg
 {
@@ -272,7 +324,6 @@ sub complete_arg
     }
 
     return undef;
-
 }
 
 sub validate
@@ -292,7 +343,32 @@ sub run
 
     return "unknown user/chat" unless defined $peer;
 
-    $tg->send_text_message( to => $peer, message => join(' ', @msg) );
+    my @ents;
+    for my $entkey (grep /^entit/, keys %$opts) {
+        my @vals = @{ $opts->{$entkey} };
+        $entkey =~ s/^entity.//;
+        my $class = (grep { lc $_ eq lc "Telegram::MessageEntity$entkey" } @$entpkgs )[0];
+        no strict 'refs';
+        my @keys = sort keys %{"$class\::FIELDS"};
+
+        die "invalid arg count" if scalar(@vals) % scalar(@keys) != 0;
+        while (my @ent = splice @vals, 0, scalar(@keys)) {
+            push @ents, $class->new(
+                    map {
+                        (shift @keys) => (shift @ent)
+                    } (0 .. $#keys)
+                );
+        }
+    }
+
+    $tg->send_text_message(
+        to => $peer,
+        message => join(' ', @msg),
+        (map {
+            (defined $opts->{$_} ? ($_ => $opts->{$_}) : ())
+        } qw(no_webpage silent background clear_draft reply_to_msg_id)),
+        (@ents ? (entities => [@ents]) : ()),
+    );
 }
 
 package Teleperl::Command::Set;
