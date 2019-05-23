@@ -53,12 +53,12 @@ use Telegram::InputPeer;
 
 use fields qw(
     _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
-    _queue reconnect session on_update on_error debug keepalive noupdate error );
+    _queue reconnect session on_update on_error on_raw_msg debug keepalive noupdate error );
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( on_update on_error noupdate debug keepalive reconnect );
+    my @args = qw( on_update on_error on_raw_msg noupdate debug keepalive reconnect );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     
@@ -659,6 +659,7 @@ sub _get_msg_cb
         my $msg = shift;
         AE::log info => __LINE__ . " " . ref $msg;
         AE::log trace => Dumper $msg->{object} if $self->{debug};
+        &{$self->{on_raw_msg}}( $msg->{object} ) if $self->{on_raw_msg};
 
         # RpcResults
         $self->_handle_rpc_result( $msg->{object} )

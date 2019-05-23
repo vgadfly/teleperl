@@ -237,4 +237,7 @@ sub unpack_true
     return 1;
 }
 
+package TL::False; sub TO_CBOR { do { bless \(my $o=1), Types::Serialiser::Boolean:: } }
+package TL::True;  sub TO_CBOR { do { bless \(my $o=0), Types::Serialiser::Boolean:: } }
+
 1;

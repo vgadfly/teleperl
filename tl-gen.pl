@@ -154,11 +154,33 @@ for my $type (@types) {
     #print $f "use $_;\n" for keys %argtypes;
 
     print $f "use fields qw( ". join( " ", @params )." );\n";
+    print $f "\nour %TYPES = (\n";
+    for my $arg (@{$type->{args}}) {
+        printf $f "  %-17s => { type => ", $arg->{name};
+        if (exists $builtin{$arg->{type}{name}}) {
+            print $f "'" . $arg->{type}{name} . "', builtin => 1, ";
+        } else {
+            my ($basepath, $basepkg) = pkgname($prefix, $arg->{type}{name});
+            print $f "'$basepkg', ";
+        }
+        print $f "vector => 1, " if exists $arg->{type}{vector};
+        print $f "optional => '$arg->{cond}{name}', " if $arg->{cond};
+        print $f "},\n";
+    }
+    print $f ");\n";
+
     print $f "\n# subs\n";
 
     print $f "sub new\n{\n  my \$class = shift;\n";
     print $f "  my \$self = fields::new( ref \$class || \$class );\n";
     print $f "  \$self->SUPER::new(\@_);\n}\n\n";
+
+    print $f "sub THAW\n{\n  my (\$class, \$serialiser, \$val) = \@_;\n";
+    print $f "  die \"unsupported deserialiser \$serialiser\" unless \$serialiser eq 'CBOR';\n";
+    print $f "  \$class->new( %\$val );\n}\n\n";
+
+    print $f "sub TO_CBOR\n{\n  my \$self = shift;\n";
+    print $f "  CBOR::XS::tag(26, [ '$pkg',\n    +{ (map { (\$_ => \$self->{\$_}) } sort keys %\$self) }\n  ])\n}\n\n";
 
     print $f "sub pack\n{\n";
     print $f "  my \$self = shift;\n";

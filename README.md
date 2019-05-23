@@ -36,7 +36,7 @@ Not yet used but discussed:
 
 ## PREPARE
 - generate parser using yapp: `yapp -m TL -s tl.yp`
-- generate MTProto and Telegram TL packages: `perl tl-gen.pl MTProto res/mtproto.tl` and `perl tl-gen.pl Telegram res/layer78.tl`
+- generate MTProto and Telegram TL packages: `perl tl-gen.pl MTProto res/mtproto.tl` and `perl tl-gen.pl Telegram res/layer78-tdesktop.tl`
 - edit config file to put your own API id/hash, phone number and possibly proxy
 - if needed, create new session (session.dat for apps) with `auth.pl`: enter to it code sent by SMS or in other session, and then press ^C
 
