@@ -6,6 +6,8 @@ Pure perl mtproto/telergam client
 - Config::Tiny
 - AnyEvent
 - IO::Socket::Socks
+- Data::Validate::IP
+- NetAddr::IP
 - Crypt::OpenSSL::Bignum
 - Crypt::OpenSSL::RSA
 - Crypt::OpenSSL::Random
@@ -13,10 +15,12 @@ Pure perl mtproto/telergam client
 - Parse::Yapp
 - Math::Prime::Util
 
-For CLI application:
-- Term::ReadLine::Gnu
+For both interactive application's examples:
 - Getopt::Long::Descriptive
 - Class::Inspector
+
+For CLI application:
+- Term::ReadLine::Gnu
 - Exception::Class
 
 For GUI application (currently minimal almost unusable quick & dirty proof-of-work):
@@ -29,9 +33,11 @@ For GUI application (currently minimal almost unusable quick & dirty proof-of-wo
   * treectrl
   * tklib (ctext tooltip widget)
 
+Not required in minimal run (optional for extra features):
+- CBOR::XS
+
 Not yet used but discussed:
 - Template::Toolkit
-- CBOR::XS
 - DBD::SQLite
 
 ## PREPARE

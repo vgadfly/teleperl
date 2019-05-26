@@ -38,6 +38,7 @@ sub option_spec {
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
     [ 'logfile|l=s' => 'path to log file', { default => "tkx.log" }         ],
     [ 'theme=s'     => 'ttk::style theme to use'                            ],
+    [ 'replay|r=s'  => 'enter offline mode & read from specified CBOR file' ],
 }
 
 ### initialization
@@ -256,6 +257,7 @@ $UI{menuSet}    = $UI{menubar}->new_menu;
 $UI{menuSetDbg} = $UI{menuSet}->new_menu;
 $UI{menubar}->add_cascade(-menu => $UI{menuFile}, -label => "File");
 $UI{menubar}->add_cascade(-menu => $UI{menuSet}, -label => "Set");
+$UI{menuFile}->add_command(-label => "Read CBOR binary log...", -command => sub { process_cbor(Tkx::tk___getOpenFile()); });
 $UI{menuFile}->add_command(-label => "Save '$opts->{session}'", -command => \&save_session);
 $UI{menuFile}->add_command(-label => "Exit", -underline => 1, -command => [\&Tkx::destroy, $UI{mw}]) unless $IS_AQUA;
 $UI{menuSet}->add_checkbutton(-label => "Verbose", -variable => \$opts->{verbose}, -onvalue => 1, -offvalue => 0);
@@ -623,6 +625,7 @@ sub setup_msglist {
 sub presetup_tags {
     my $text = shift;   # widget
 
+    # TODO font_actual
     $text->tag_configure('Telegram::MessageEntityMention',      -foreground => 'red', );
     $text->tag_configure('Telegram::MessageEntityHashtag',      -foreground => 'darkgreen', );
     $text->tag_configure('Telegram::MessageEntityBotCommand',   -foreground => 'brown', );
@@ -885,7 +888,7 @@ sub handle_pageblock {
             $tw->insert_end("\n");
             handle_richtext($tw, $block->{text}, 'Blockquote');
         },
-        Pullquote   => sub {
+        Pullquote   => sub {    # TODO Pullquote is expandable 'spoiler' on click
             handle_richtext($tw, $block->{caption}, 'Caption');
             $tw->insert_end("\n");
             handle_richtext($tw, $block->{text}, 'Pullquote');
@@ -977,7 +980,7 @@ sub handle_msg {
     $textbegin =~ s/\n/ /g;
     $textbegin = '[media]' if $textbegin eq '' and exists $msg->{media};
 
-    AE::log trace => "@{[%envelope]} txt=$textbegin";
+    AE::log trace => "@{[map { $_ // 'undef' } %envelope]} txt=$textbegin";
 
     # first, entry for dialog in tree if not exists yet
     $id = $envelope{where_id};
@@ -1110,7 +1113,7 @@ sub report_update
 {
     my ($upd) = @_;
 
-    AE::log info => "report_update";
+    AE::log trace => Dumper($upd);
     if ($upd->isa('MTProto::RpcError')) {
         render("\rRpcError $upd->{error_code}: $upd->{error_message}");
     }
@@ -1130,7 +1133,7 @@ sub render_msg_console {
     #@type Telegram::Message
     my $msg = shift;
 
-    AE::log info => "render_msg_console";
+    AE::log debug => "enter";
     my $v = $opts->{verbose};
 
     my $name = defined $msg->{from_id} ? $tg->peer_name($msg->{from_id}, 1) : '(noid)';
@@ -1174,13 +1177,109 @@ sub render_msg_console {
 }
 
 sub save_session {
+    if ($opts->replay) {
+        AE::log note => "offline, not saving session";
+        return;
+    }
     AE::log note => "saving session file";
     store( $tg->{session}, $opts->session );
 }
 
-### now let's start everything
+my (@_cbor_q, $_cbor_t, $_cbor_l, $_cbor_i);
+# XXX
+sub _one_cbor_rec {
+    my $obj     = shift @_cbor_q;
+    my $octets  = shift @_cbor_q;
 
-$tg->start;
+    if ( $obj->isa('Telegram::UpdatesABC') ) {
+        $tg->_handle_updates($obj)
+    }
+    elsif ( $obj->isa('MTProto::RpcResult') ) {
+        my $res = $obj->{result};
+
+        if ($res->isa('Telegram::Updates::DifferenceABC')) {
+            $tg->_handle_upd_diff($res)
+        }
+        elsif ($res->isa('Telegram::Updates::ChannelDifferenceTooLong')
+            || $res->isa('Telegram::Updates::ChannelDifference')
+        ) {
+            my $chan = (grep { $_->isa('Telegram::Channel') } @{$res->{chats}})[0];
+            if ($chan) {
+                $tg->_handle_channel_diff($chan->{id}, $res);
+            } else {
+                AE::log warn => Dumper($obj);
+            }
+        }
+    }
+
+    $pbValue+=$octets, $_cbor_i++;
+    if (@_cbor_q) {
+        Tkx::after(1, \&_one_cbor_rec);
+    } else {
+        $_cbor_t = time - $_cbor_t;
+        $statusText = "Read $_cbor_l bytes of $_cbor_i records ("
+                    . ($_cbor_l/$_cbor_i)." byte average) in $_cbor_t seconds: "
+                    . ($_cbor_l/$_cbor_t). " bytes/s, " .($_cbor_i/$_cbor_t). " records/s";
+        render($statusText);    # save as status may be overwritten by clicks during reading
+    }
+}
+
+sub process_cbor {
+    my $filename = shift;
+    $_cbor_t = time;
+
+    open my $fh, "<", $filename
+        or die "can't open '$filename': $!";
+    binmode $fh;
+
+    local $/ = undef;   # slurp all file at once
+    my $cbor_data = <$fh>;
+
+    $_cbor_l = length $cbor_data;
+    $UI{pbCountDone}->configure(-maximum => $_cbor_l);
+    $pbValue = 0;
+
+    my $cbor = CBOR::XS->new;
+    my ($rec, $octets);
+
+    $_cbor_i = 0;
+    while (length $cbor_data) {
+        ($rec, $octets) = $cbor->decode_prefix ($cbor_data);
+        substr($cbor_data, 0, $octets) = '';
+        push @_cbor_q, $_->{data}, $octets for (ref $rec eq 'HASH' ? $rec : @$rec);
+    }
+    Tkx::after(1, \&_one_cbor_rec);
+}
+
+### now let's start everything (or not)
+
+if (my $fname = $opts->replay) {
+    require CBOR::XS;
+    require $_ for map { $_->{file} } values %Telegram::ObjTable::tl_type;
+    require $_ for map { $_->{file} } values %MTProto::ObjTable::tl_type;
+
+    no strict 'refs';
+    *Telegram::invoke = sub {
+        return if caller eq 'Telegram';
+        Tkx::tk___messageBox(
+            -parent => $UI{mw},
+            -title => "\u$0 is in offline mode!",
+            -type => "ok",
+            -icon => "error",
+            -message => "In offline mode network queries are disabled\n" .
+                        "(because e.g. another process may be writing logs with this session)\n" .
+                        "\n\nYou can read another CBOR binary log in 'File' menu.",
+        );
+    };
+    # if file is big, window won't show up for long 'coz we're not in MainLoop yet
+    $statusText = 'Offline mode, reading your file, this can take minutes if it is big, please wait...';
+    Tkx::after(200, sub {
+        process_cbor($fname);
+    });
+}
+else {
+    $tg->start;
+}
 
 Tkx::MainLoop();
 AE::log note => "quittin..";
