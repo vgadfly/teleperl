@@ -141,7 +141,7 @@ sub auth
          
         if( $method == AUTH_LOGIN and $self->{login} and $self->{password}){  
                 $self->{hd}->push_write( 
-                        pack('CC', 5, length $self->{login} ) . $self->{login} 
+                        pack('CC', 1, length $self->{login} ) . $self->{login} 
                         . pack('C', length $self->{password}) . $self->{password} 
                 );              
                 $self->{hd}->push_read( chunk => 2, sub{
