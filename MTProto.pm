@@ -68,7 +68,7 @@ package MTProto;
 use Data::Dumper;
 
 use fields qw( debug session on_message on_error noack last_error 
-    _lock _plain _pending _tcp_first _aeh _handle_plain _pq _queue);
+    _lock _plain _pending _tcp_first _aeh _handle_plain _pq _queue _state);
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -99,6 +99,8 @@ use MTProto::MsgsAck;
 use MTProto::DestroySession;
 
 use Keys;
+
+our @states = qw/init phase_one phase_two phase_three session_ok/;
 
 sub aes_ige_enc
 {
@@ -174,6 +176,7 @@ sub new
     $self->{_tcp_first} = 1;
     $self->{_plain} = 0;
     $self->{_lock} = 0;
+    $self->_state('init');
     
     @$self{@args} = @arg{@args};
 
@@ -184,8 +187,7 @@ sub new
     $aeh->on_drain( $self->_get_write_cb );
     $self->{_aeh} = $aeh;
     
-    # generate new auth_key
-    $self->start_session unless defined $self->{session}{auth_key};
+    $self->_start_session;
 
     return $self;
 }
@@ -206,12 +208,7 @@ sub _get_read_cb
                 } else {
                     $_[0]->unshift_read( chunk => $len, sub {
                             my $msg = $_[1];
-                            if ($self->{_plain}) {
-                                $self->_recv_plain($msg);
-                            }
-                            else {
-                                $self->_handle_encrypted($msg); 
-                            }
+                            $self->_recv_msg($msg);
                     } )
                 }
         } );
@@ -243,9 +240,13 @@ sub _get_write_cb
 }
 
 ## generate auth key and shit
-sub start_session
+sub _start_session
 {
     my $self = shift;
+
+    return $self->_state('session_ok') if defined $self->{session}{auth_key};
+
+    $self->_state('phase_one');
 
     AE::log debug => "starting new session\n" if $self->{debug};
 
@@ -263,9 +264,6 @@ sub start_session
     $req_pq->{nonce} = $nonce;
     $self->{_pq}{nonce} = $nonce;
 
-    $self->{_handle_plain} = sub {
-            $self->_phase_one(@_);
-    };
     $self->_send_plain( pack( "(a4)*", $req_pq->pack ) );
 }
 
@@ -455,6 +453,17 @@ sub _phase_three
     delete $self->{_pq};
     # process message queue
     $self->_dequeue;
+}
+
+sub _recv_msg
+{
+    my $self = shift;
+    $self->_stateful(@_);
+}
+
+sub _recv_msg__session_ok
+{
+    goto &_handle_encrypted;
 }
 
 ## send unencrypted message
