@@ -53,12 +53,14 @@ use Telegram::InputPeer;
 
 use fields qw(
     _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
-    _queue reconnect session on_update on_error on_raw_msg debug keepalive noupdate error );
+    _queue reconnect session debug keepalive noupdate error
+    on_update on_error on_raw_msg after_invoke
+);
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( on_update on_error on_raw_msg noupdate debug keepalive reconnect );
+    my @args = qw( on_update on_error on_raw_msg after_invoke noupdate debug keepalive reconnect );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     
@@ -87,35 +89,26 @@ sub start
     my $aeh;
 
     if (defined $self->{_proxy}) {
+        # XXX: blocking connect
         AE::log info => "using proxy %s:%d", map { $self->{_proxy}{$_} } qw/addr port/;
-        $aeh = AnyEvent::Handle->new( 
-            connect => [ map{ $self->{_proxy}{$_}} qw/addr port/ ],
-            on_connect_error => sub { die "Connection error" },
-            on_connect => sub {
-                my $socks = AnyEventSocks->new(
-                    hd => $aeh, 
-                    login => $self->{_proxy}{user},
-                    password => $self->{_proxy}{pass},
-                    cb => sub { $self->_mt($aeh) }
-                );
-                $socks->connect( map{ $self->{_dc}{$_} } qw/addr port/ );
-            }
-        );
+        my $sock = IO::Socket::Socks->new(
+            ProxyAddr => $self->{_proxy}{addr},
+            ProxyPort => $self->{_proxy}{port},
+            ConnectAddr => $self->{_dc}{addr}, 
+            ConnectPort => $self->{_dc}{port},
+            Username => $self->{_proxy}{user},
+            Password => $self->{_proxy}{pass}
+        ) or die "Proxy connection error";
+        $aeh = AnyEvent::Handle->new( fh => $sock );
     }
     else {
         AE::log info => "not using proxy: %s:%d", map{ $self->{_dc}{$_}} qw/addr port/;
         $aeh = AnyEvent::Handle->new( 
             connect => [ map{ $self->{_dc}{$_}} qw/addr port/ ],
-            on_connect_error => sub { die "Connection error" },
-            on_connect => sub { $self->_mt($aeh) }
+            on_connect_error => sub { die "Connection error" }
         );
     }
-}
-
-sub _mt
-{    
-    my( $self, $aeh ) = @_;
-
+    
     $self->{_mt} = MTProto->new( socket => $aeh, session => $self->{session}{mtproto},
             on_error => $self->_get_err_cb, on_message => $self->_get_msg_cb,
             debug => $self->{debug}
@@ -199,6 +192,7 @@ sub invoke
     $self->{_req}{$req_id}{query} = $query;
     # store handler for this query result
     $self->{_req}{$req_id}{cb} = $res_cb if defined $res_cb;
+    &{$self->{after_invoke}}($req_id, $query, $res_cb) if defined $self->{after_invoke};
     return $req_id;
 }
 

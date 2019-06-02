@@ -1129,6 +1129,8 @@ sub report_update
     }
 }
 
+my $_cbortime;
+
 sub render_msg_console {
     #@type Telegram::Message
     my $msg = shift;
@@ -1166,8 +1168,11 @@ sub render_msg_console {
     $add .= "[media] "                                              if exists $msg->{media};
     $add .= "[reply_markup] "                                       if exists $msg->{reply_markup};
 
-    my @t = localtime;
-    render("[rcvd " . join(":", map {"0"x(2-length).$_} reverse @t[0..2]) . "] "
+    my @t = localtime($_cbortime // ());
+    render(($_cbortime
+            ? "[logged " . _format_time($_cbortime)
+            : "[rcvd " . join(":", map {"0"x(2-length).$_} reverse @t[0..2]))
+        . "] "
         . ($v ? "id=$msg->{id} ":"")
         . _format_time($msg->{date}) . " "
         . "$name$to: $add"
@@ -1190,6 +1195,20 @@ my (@_cbor_q, $_cbor_t, $_cbor_l, $_cbor_i);
 sub _one_cbor_rec {
     my $obj     = shift @_cbor_q;
     my $octets  = shift @_cbor_q;
+
+    $_cbortime = delete $obj->{time};
+    if (exists $obj->{data}) {
+        $obj = $obj->{data};
+    }
+    elsif (exists $obj->{in}) {
+        $obj = $obj->{in};
+    }
+    else {
+        local $Data::Dumper::Indent = 0;
+        render("[sent " . _format_time($_cbortime) . "] " . Dumper($obj) . "\n");
+        $obj =  $obj->{out};
+        # TODO use saved req_id/cb for later match in 'in'
+    }
 
     if ( $obj->isa('Telegram::UpdatesABC') ) {
         $tg->_handle_updates($obj)
@@ -1246,7 +1265,7 @@ sub process_cbor {
     while (length $cbor_data) {
         ($rec, $octets) = $cbor->decode_prefix ($cbor_data);
         substr($cbor_data, 0, $octets) = '';
-        push @_cbor_q, $_->{data}, $octets for (ref $rec eq 'HASH' ? $rec : @$rec);
+        push @_cbor_q, $_, $octets for (ref $rec eq 'HASH' ? $rec : @$rec);
     }
     Tkx::after(1, \&_one_cbor_rec);
 }

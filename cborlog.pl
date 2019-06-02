@@ -1,6 +1,6 @@
 #!/usr/bib/env perl5
 
-my $VERSION = 0.01;
+my $VERSION = 0.02;
 
 use Modern::Perl;
 use utf8;
@@ -15,6 +15,7 @@ use CBOR::XS;
 
 use AnyEvent;
 use AnyEvent::Log;
+eval "use Time::HiRes qw(time);";
 
 use Telegram;
 
@@ -110,7 +111,9 @@ my $tg = Telegram->new(
 );
 $tg->{on_raw_msg} = \&one_message;
 
+my $cbor = CBOR::XS->new->pack_strings(1);
 my $cbor_data;
+my @clones;
 
 # adapted from Hash::Util to process arrays
 sub unlock_hashref_recurse {
@@ -140,6 +143,8 @@ sub unlock_hashref_recurse {
 sub one_message {
     my $mesg = shift;
 
+    return if ref($mesg) =~ /MTProto::P.ng/ and not $opts->verbose;
+
     AE::log error => ">1 arg " . Dumper(@_) if @_;
 
     # XXX workaround of 'use fields' :(
@@ -147,16 +152,49 @@ sub one_message {
     AE::log trace => "$mesg $clone".Dumper($mesg, $clone);
     unlock_hashref_recurse($clone);
 
-    $cbor_data .= encode_cbor +{ time => time, data => $clone };
+    push @clones, +{ time => time, in => $clone };
+
+    _pack() if @clones > 254;   # one byte economy :)
 };
 
+# NOTE this doesn't make sense here in right this daemon - serves mostly
+# an example for real app wishing to log
+sub after_invoke {
+    my ($req_id, $query, $res_cb) = @_;
+
+    my $cbname = eval {
+        require Sub::Util;
+        Sub::Util::subname($res_cb);
+    };
+
+    # XXX workaround of 'use fields' :(
+    my $clone = dclone $query;
+    AE::log trace => "$req_id $clone".Dumper($req_id, $clone);
+    unlock_hashref_recurse($clone);
+
+    push @clones, +{
+        time => time,
+        out => $clone,
+        req_id => $req_id,
+        ($cbname ? (cb => $cbname) : ())
+    };
+    # don't pack here, request may be still on queue and not sent yet
+}
+
+sub _pack {
+    return unless @clones;
+    $cbor_data .= $cbor->encode(@clones > 1 ? \@clones : $clones[0]);
+    @clones = ();
+}
+
 sub save_cbor {
+    _pack();
     return unless length $cbor_data > 3;
 
     my $fname = POSIX::strftime("%Y.%m.%d_%H", localtime);
     $fname = "$opts->{prefix}/$fname.cbor";
 
-    $cbor_data = $CBOR::XS::MAGIC unless -e $fname;
+    $cbor_data = $CBOR::XS::MAGIC . $cbor_data unless -e $fname;
 
     sysopen my $fh, $fname, AnyEvent::IO::O_CREAT | AnyEvent::IO::O_WRONLY | AnyEvent::IO::O_APPEND, 0666
         or AE::log fatal => "can't open $fname: $!";
@@ -199,6 +237,9 @@ sub check_exit {
 
 $tg->start;
 
+# XXX socks5 crutch!
+AnyEvent->_poll until defined $tg->{_mt};
+
 # subscribe to updates by any high-level query
 $tg->invoke(
     Telegram::Messages::GetDialogs->new(
@@ -216,7 +257,7 @@ my $watch = AnyEvent->timer(
     after => 2,
     interval => 1,
     cb => sub {
-        save_cbor;
+        save_cbor if $save_i % 60 == 0;
         $cond->send if &check_exit;
         save_session() if $save_i++ % 3600 == 0;
     },
