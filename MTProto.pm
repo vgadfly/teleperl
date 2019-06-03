@@ -67,8 +67,9 @@ package MTProto;
 
 use Data::Dumper;
 
+use base 'Class::Stateful';
 use fields qw( debug session on_message on_error noack last_error 
-    _lock _plain _pending _tcp_first _aeh _handle_plain _pq _queue _state);
+    _lock _pending _tcp_first _aeh _pq _queue);
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -100,7 +101,6 @@ use MTProto::DestroySession;
 
 use Keys;
 
-our @states = qw/init phase_one phase_two phase_three session_ok/;
 
 sub aes_ige_enc
 {
@@ -174,8 +174,8 @@ sub new
     my $self = fields::new( ref $class || $class );
     
     $self->{_tcp_first} = 1;
-    $self->{_plain} = 0;
     $self->{_lock} = 0;
+    $self->_set_states( qw/init phase_one phase_two phase_three session_ok/ );
     $self->_state('init');
     
     @$self{@args} = @arg{@args};
@@ -275,6 +275,9 @@ sub _phase_one
     my ($self, $data) = @_;
     my $nonce = $self->{_pq}{nonce};
     
+    my $datalen = unpack "L<", substr($data, 16, 4);
+    $data = substr($data, 20, $datalen);
+    
     my @stream = unpack( "(a4)*", $data );
     die unless @stream;
 
@@ -336,6 +339,9 @@ sub _phase_two
 {
     my ($self, $data) = @_;
 
+    my $datalen = unpack "L<", substr($data, 16, 4);
+    $data = substr($data, 20, $datalen);
+    
     my $nonce = $self->{_pq}{nonce};
     my $new_nonce = $self->{_pq}{new_nonce};
     my $server_nonce = $self->{_pq}{server_nonce};
@@ -419,6 +425,9 @@ sub _phase_three
 {
     my ($self, $data) = @_;
 
+    my $datalen = unpack "L<", substr($data, 16, 4);
+    $data = substr($data, 20, $datalen);
+    
     my $nonce = $self->{_pq}{nonce};
     my $new_nonce = $self->{_pq}{new_nonce};
     my $server_nonce = $self->{_pq}{server_nonce};
@@ -455,18 +464,21 @@ sub _phase_three
     $self->_dequeue;
 }
 
+## recv message and handle according to current state
+
 sub _recv_msg
 {
     my $self = shift;
-    $self->_stateful(@_);
+    $self->_stateful('_', @_);
 }
 
-sub _recv_msg__session_ok
+sub _session_ok
 {
     goto &_handle_encrypted;
 }
 
 ## send unencrypted message
+#
 sub _send_plain
 {
     my ($self, $data) = @_;
@@ -495,7 +507,7 @@ sub _dequeue
     local $_;
 
     # don't do anything if session is not yet espablished
-    return unless $self->{session}{auth_key_id};
+    return unless $self->{_state} eq 'session_ok';
 
     $self->{_lock} = 0;
 
@@ -508,7 +520,7 @@ sub _dequeue
 ## else -- pushes to internal queue, which is then processed when socket 
 ## becomes ready
 ##
-## multiple messages can be packed together
+## multiple messages may be packed together
 ##
 sub send
 {
@@ -519,7 +531,7 @@ sub send
     
     # XXX: just use lock in new
     # check if session is ready
-    unless ($self->{session}{session_id} and $self->{session}{auth_key_id}) {
+    unless ($self->{_state} eq 'session_ok') {
         AE::log debug => "session not ready, queueing\n" if $self->{debug};
         $self->_enqueue($_) for @msg;
         return;
