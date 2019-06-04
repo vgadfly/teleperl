@@ -69,7 +69,7 @@ use Data::Dumper;
 
 use base 'Class::Stateful';
 use fields qw( debug session on_message on_error noack last_error 
-    _lock _pending _tcp_first _aeh _pq _queue);
+    _lock _pending _tcp_first _aeh _pq _queue );
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -172,6 +172,7 @@ sub new
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
+    $self = $self->SUPER::new;
     
     $self->{_tcp_first} = 1;
     $self->{_lock} = 0;

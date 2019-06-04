@@ -2,7 +2,21 @@ use Modern::Perl;
 
 package Class::Stateful;
 
+use Object::Event;
+
 use fields qw(_state _states);
+use base 'Object::Event';
+
+sub new
+{
+    my $class = shift;
+    
+    #my $self = fields::new( ref $class || $class );
+    my $self = bless ( {}, ref $class || $class );
+    $self = $self->SUPER::new;
+
+    return $self;
+}
 
 sub _stateful
 {
@@ -14,7 +28,7 @@ sub _stateful
     eval { $self->$method(@_) };
     if ($@) {
         $self->{_state} = '_FATAL_';
-        #emit FATAL
+        $self->event(fatal => $@)
     }
 }
 
@@ -23,11 +37,11 @@ sub _state
     my ($self, $state) = @_;
     if ( exists $self->{_states}{$state} ) {
         $self->{_state} = $state;
-        #emit STATE
+        $self->event(state => $state);
     }
     else {
         $self->{_state} = '_FATAL_';
-        #emit FATAL
+        $self->event(fatal => "Unknown state $state");
     }
 }
 

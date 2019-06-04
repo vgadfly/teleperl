@@ -120,7 +120,7 @@ sub _mt
             on_error => $self->_get_err_cb, on_message => $self->_get_msg_cb,
             debug => $self->{debug}
     );
-
+    $self->{_mt}->reg_cb( state => sub { AE::log debug => "state @_" } );
     $self->run_updates unless $self->{noupdate};
 }
 
