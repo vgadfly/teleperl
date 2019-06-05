@@ -184,9 +184,6 @@ sub new
     $aeh->on_drain( $self->_get_write_cb );
     $self->{_aeh} = $aeh;
     
-    # generate new auth_key
-    $self->start_session unless defined $self->{session}{auth_key};
-
     return $self;
 }
 
@@ -246,6 +243,8 @@ sub _get_write_cb
 sub start_session
 {
     my $self = shift;
+
+    return if defined $self->{session}{auth_key};
 
     AE::log debug => "starting new session\n" if $self->{debug};
 

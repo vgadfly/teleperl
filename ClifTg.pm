@@ -1,7 +1,7 @@
 use Modern::Perl;
 use utf8;
 
-package Teleperl;
+package CliTg;
 use base "CLI::Framework";
 
 use Carp;

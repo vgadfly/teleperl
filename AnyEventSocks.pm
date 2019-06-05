@@ -24,7 +24,7 @@ use constant {
 };
 
 use AnyEvent::Socket qw/format_ipv4 format_ipv6/;
-use Socket qw(inet_pton inet_ntop inet_ntoa AF_INET AF_INET6);
+use Socket qw(inet_pton inet_ntop inet_aton inet_ntoa AF_INET AF_INET6);
 use Data::Validate::IP qw(is_ipv4 is_ipv6);
 
 sub new
@@ -69,7 +69,7 @@ sub pack_ipv6 {
 sub pack_address {
         my ($self, $type, $addr) = @_;
         if($type == TYPE_IP4) {
-                return pack('C1', $type) . inet_pton(AF_INET, $addr);
+                return pack('C1', $type) . inet_aton($addr);
         } elsif($type == TYPE_IP6) {
                 return pack('C1', $type) . inet_pton(AF_INET6, $addr);
         } elsif($type == TYPE_FQDN) {
@@ -141,7 +141,7 @@ sub auth
          
         if( $method == AUTH_LOGIN and $self->{login} and $self->{password}){  
                 $self->{hd}->push_write( 
-                        pack('CC', 5, length $self->{login} ) . $self->{login} 
+                        pack('CC', 1, length $self->{login} ) . $self->{login} 
                         . pack('C', length $self->{password}) . $self->{password} 
                 );              
                 $self->{hd}->push_read( chunk => 2, sub{

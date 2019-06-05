@@ -5,7 +5,7 @@ use Modern::Perl;
 use Storable qw(store);
 use ClifTg;
 
-my $app = Teleperl->new;
+my $app = CliTg->new;
 $app->set_default_command('console');
 $app->run or warn("non-clean exit, will not save session\n"), exit;
 
