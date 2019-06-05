@@ -71,7 +71,6 @@ sub pack_address {
         if($type == TYPE_IP4) {
                 return pack('C1', $type) . inet_aton($addr);
         } elsif($type == TYPE_IP6) {
-                die "IPv6 on MSWin is unsupported" if $^O eq 'MSWin32';
                 return pack('C1', $type) . inet_pton(AF_INET6, $addr);
         } elsif($type == TYPE_FQDN) {
                 return pack('C1C/a*', $type, $addr);
