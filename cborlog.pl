@@ -63,9 +63,7 @@ $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path
           $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
           $_[0],
           map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-              ($opts->verbose
-                  ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                  : $_[1]),
+               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
                (@_ > 2 ? @_[2..$#_] : ())
           );
     };
@@ -74,9 +72,7 @@ $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path
           $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
           $_[0],
           map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-              ($opts->verbose
-                  ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                  : $_[1]),
+               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
                (@_ > 2 ? @_[2..$#_] : ())
           );
     };
@@ -263,10 +259,14 @@ my $watch = AnyEvent->timer(
     },
 );
 
-#my $signal = AnyEvent->signal( signal => 'INT', cb => sub {
-#        AE::log note => "INT recvd";
-#        $cond->send;
-#    } );
+my $signal;
+if ($^O ne 'MSWin32') {
+    $signal = AnyEvent->signal( signal => 'INT', cb => sub {
+            AE::log note => "INT recvd";
+            $cond->send;
+        }
+    );
+}
 
 $cond->recv;
 
