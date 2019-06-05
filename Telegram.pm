@@ -53,12 +53,14 @@ use Telegram::InputPeer;
 
 use fields qw(
     _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
-    _queue reconnect session on_update on_error on_raw_msg debug keepalive noupdate error );
+    _queue reconnect session debug keepalive noupdate error
+    on_update on_error on_raw_msg after_invoke
+);
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( on_update on_error on_raw_msg noupdate debug keepalive reconnect );
+    my @args = qw( on_update on_error on_raw_msg after_invoke noupdate debug keepalive reconnect );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     
@@ -162,6 +164,7 @@ sub _real_invoke
     $self->{_req}{$req_id}{query} = $query;
     $self->{_req}{$req_id}{cb} = $cb if defined $cb;
     AE::log debug => "invoked $req_id for " . ref $query;
+    &{$self->{after_invoke}}($req_id, $query, $res_cb) if defined $self->{after_invoke};
 }
 
 ## layer wrapper
