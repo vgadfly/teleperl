@@ -101,7 +101,6 @@ use MTProto::DestroySession;
 
 use Keys;
 
-
 sub aes_ige_enc
 {
     my ($plain, $key, $iv) = @_;
@@ -188,8 +187,6 @@ sub new
     $aeh->on_drain( $self->_get_write_cb );
     $self->{_aeh} = $aeh;
     
-    $self->_start_session;
-
     return $self;
 }
 
@@ -241,7 +238,7 @@ sub _get_write_cb
 }
 
 ## generate auth key and shit
-sub _start_session
+sub start_session
 {
     my $self = shift;
 
@@ -479,7 +476,6 @@ sub _session_ok
 }
 
 ## send unencrypted message
-#
 sub _send_plain
 {
     my ($self, $data) = @_;
