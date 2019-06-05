@@ -24,7 +24,7 @@ use constant {
 };
 
 use AnyEvent::Socket qw/format_ipv4 format_ipv6/;
-use Socket qw(inet_pton inet_ntop inet_ntoa AF_INET AF_INET6);
+use Socket qw(inet_pton inet_ntop inet_aton inet_ntoa AF_INET AF_INET6);
 use Data::Validate::IP qw(is_ipv4 is_ipv6);
 
 sub new
@@ -69,8 +69,9 @@ sub pack_ipv6 {
 sub pack_address {
         my ($self, $type, $addr) = @_;
         if($type == TYPE_IP4) {
-                return pack('C1', $type) . inet_pton(AF_INET, $addr);
+                return pack('C1', $type) . inet_aton($addr);
         } elsif($type == TYPE_IP6) {
+                die "IPv6 on MSWin is unsupported" if $^O eq 'MSWin32';
                 return pack('C1', $type) . inet_pton(AF_INET6, $addr);
         } elsif($type == TYPE_FQDN) {
                 return pack('C1C/a*', $type, $addr);
