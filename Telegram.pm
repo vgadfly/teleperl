@@ -74,13 +74,12 @@ sub new
     $session->{mtproto} = {} unless exists $session->{mtproto};
     $self->{session} = $session;
     $self->{_first} = 1;
-    $self->{_lock} = 0;
+    $self->{_lock} = 1;
 
     return $self;
 }
 
 # connect, start session
-# XXX: asyncronous connect
 sub start
 {
     my $self = shift;
@@ -116,12 +115,16 @@ sub _mt
 {    
     my( $self, $aeh ) = @_;
 
-    $self->{_mt} = MTProto->new( socket => $aeh, session => $self->{session}{mtproto},
+    my $mt = MTProto->new( socket => $aeh, session => $self->{session}{mtproto},
             on_error => $self->_get_err_cb, on_message => $self->_get_msg_cb,
             debug => $self->{debug}
     );
+    #$mt->reg_cb( state => sub { AE::log debug => "state @_" } );
+    $mt->start_session;
+    $self->{_mt} = $mt;
 
     $self->run_updates unless $self->{noupdate};
+    $self->_dequeue; # unlock
 }
 
 sub run_updates {
@@ -151,6 +154,16 @@ sub run_updates {
         );
     }
 }
+
+sub _real_invoke
+{
+    my ( $self, $query, $cb ) = @_;
+    my $req_id = $self->{_mt}->invoke( $query );
+    $self->{_req}{$req_id}{query} = $query;
+    $self->{_req}{$req_id}{cb} = $cb if defined $cb;
+    AE::log debug => "invoked $req_id for " . ref $query;
+}
+
 ## layer wrapper
 
 sub invoke
@@ -162,6 +175,7 @@ sub invoke
     AE::log trace => Dumper $query if $self->{debug};
     if ($self->{_first}) {
         AE::log debug => "first, using wrapper";
+        my $inner = $query;
         
         # Wrapper conn
         my $conn = Telegram::InitConnection->new( 
@@ -172,39 +186,23 @@ sub invoke
                 system_lang_code => 'en',
                 lang_pack => '',
                 lang_code => 'en',
-                query => $query
+                query => $inner
         );
-        my $wrapper = Telegram::InvokeWithLayer->new( layer => 78, query => $conn ); 
-        
-        if ($self->{_lock}) {
-            $self->_enqueue( $wrapper, $res_cb );
-        }
-        else {
-            $req_id = $self->{_mt}->invoke( $wrapper );
-        }
-
+        $query = Telegram::InvokeWithLayer->new( layer => 78, query => $conn ); 
         $self->{_first} = 0;
     }
-    else {
-        if ($self->{_lock}) {
-            $self->_enqueue( $query, $res_cb );
-        }
-        else {
-            $req_id = $self->{_mt}->invoke( $query );
-        }
-        $req_id = $self->{_mt}->invoke( $query );
+    if ($self->{_lock}) {
+        $self->_enqueue( $query, $res_cb );
     }
-
-    AE::log debug => "invoked $req_id for " . ref $query;
-    $self->{_req}{$req_id}{query} = $query;
-    # store handler for this query result
-    $self->{_req}{$req_id}{cb} = $res_cb if defined $res_cb;
-    return $req_id;
+    else {
+        $self->_real_invoke( $query, $res_cb );
+    }
 }
 
 sub _enqueue
 {
     my ($self, $query, $cb) = @_;
+        AE::log debug => "first, using wrapper";
     push @{$self->{_queue}}, [$query, $cb];
 }
 
@@ -212,8 +210,8 @@ sub _dequeue
 {
     my $self = shift;
     local $_;
-    $self->invoke($_->[0], $_->[1]) while ( $_ = shift @{$self->{_queue}} );
     $self->{_lock} = 0;
+    $self->invoke($_->[0], $_->[1]) while ( $_ = shift @{$self->{_queue}} );
 }
 
 sub auth
