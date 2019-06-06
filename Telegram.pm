@@ -202,7 +202,7 @@ sub invoke
 sub _enqueue
 {
     my ($self, $query, $cb) = @_;
-        AE::log debug => "first, using wrapper";
+    AE::log debug => "session locked, enqueue";
     push @{$self->{_queue}}, [$query, $cb];
 }
 
