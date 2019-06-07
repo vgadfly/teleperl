@@ -38,11 +38,14 @@ use Telegram::Updates::GetChannelDifference;
 sub new
 {
     my ($class, $session, $tg) = @_;
-    weaken $tg;
     my $self = fields::new( ref $class || $class );
+    
+    weaken $tg;
     $self->{_tg} = $tg;
     $self->{session} = $session;
     $self->_lock;
+
+    return $self;
 }
 
 sub sync
@@ -52,7 +55,7 @@ sub sync
     $self->_lock;
 
     if (not exists $self->{session} or $force) {
-        $self->invoke( Telegram::Updates::GetState->new, 
+        $self->{_tg}->invoke( Telegram::Updates::GetState->new, 
             sub {
                 my $us = shift;
                 if ($us->isa('Telegram::Updates::State')) {
@@ -65,7 +68,7 @@ sub sync
         );
     }
     else {
-        $self->invoke( 
+        $self->{_tg}->invoke( 
             Telegram::Updates::GetDifference->new( 
                    date => $self->{session}{date},
                    pts => $self->{session}{pts},
@@ -81,6 +84,7 @@ sub sync
 sub _lock
 {
     my $self = shift;
+    AE::log debug => "locking updates queue";
     $self->{_lock} = 1;
 }
 
@@ -89,6 +93,7 @@ sub _unlock
     my $self = shift;
     local $_;
 
+    AE::log debug => "unlocking updates queue";
     # process queue
     $self->_do_handle_updates($_) while ($_ = shift @{$self->{_q}});
     
@@ -107,7 +112,7 @@ sub _check_pts
         AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"") if $self->{debug};
         if (defined $channel) {
             my $channel_peer = $self->peer_from_id( $channel );
-            $self->invoke( Telegram::Updates::GetChannelDifference->new(
+            $self->{_tg}->invoke( Telegram::Updates::GetChannelDifference->new(
                 channel => $channel_peer,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
                 pts => $local_pts,
@@ -117,7 +122,7 @@ sub _check_pts
             ) if defined $channel_peer;
         }
         else {
-            $self->invoke( Telegram::Updates::GetDifference->new( 
+            $self->{_tg}->invoke( Telegram::Updates::GetDifference->new( 
                 date => $self->{session}{date},
                 pts => $local_pts,
                 qts => -1,
@@ -170,7 +175,7 @@ sub _handle_update
         my $local_pts = $self->{session}{channel_pts}{$upd->{channel_id}};
         AE::log warn => "rcvd ChannelTooLong for $upd->{channel_id} but no local pts thus no updates"
             unless defined $local_pts;
-        $self->invoke(
+        $self->{_tg}->invoke(
             Telegram::Updates::GetChannelDifference->new(
                 channel => $channel,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
@@ -268,7 +273,7 @@ sub _handle_upd_diff
     if ($diff->isa('Telegram::Updates::DifferenceSlice')) {
         $unlock = 0;
         $upd_state = $diff->{intermediate_state};
-        $self->invoke( Telegram::Updates::GetDifference->new( 
+        $self->{_tg}->invoke( Telegram::Updates::GetDifference->new( 
                     date => $upd_state->{date},
                     pts => $upd_state->{pts},
                     qts => -1,
@@ -328,7 +333,7 @@ sub _handle_channel_diff
            &{$self->{on_update}}($msg) if $self->{on_update};
         }
 
-        #$self->invoke( Telegram::Updates::GetChannelDifference->new(
+        #$self->{_tg}->invoke( Telegram::Updates::GetChannelDifference->new(
         #    channel => $channel_peer,
         #    filter => Telegram::ChannelMessagesFilterEmpty->new,
         #    pts => $local_pts,
@@ -370,7 +375,7 @@ sub handle_updates
 
 sub _do_handle_updates
 {
-    my ($self, $update) = @_;
+    my ($self, $updates) = @_;
 
     # short spec updates
     # ShortSentMessage?
@@ -402,7 +407,7 @@ sub _do_handle_updates
     }
     
     if ( $updates->isa('Telegram::UpdatesTooLong') ) {
-        $self->invoke( Telegram::Updates::GetDifference->new( 
+        $self->{_tg}->invoke( Telegram::Updates::GetDifference->new( 
                 date => $self->{session}{date},
                 pts => $self->{session}{pts},
                 qts => -1,

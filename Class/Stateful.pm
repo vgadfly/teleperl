@@ -56,7 +56,7 @@ sub _set_states
 
 sub _fatal
 {
-    my ($self, $fatal) = @_
+    my ($self, $fatal) = @_;
     
     $self->{_fatal} = $fatal;
     $self->_state('fatal');
