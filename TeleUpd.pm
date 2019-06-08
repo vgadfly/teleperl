@@ -330,7 +330,7 @@ sub _handle_channel_diff
         AE::log info => "new pts=$diff->{pts}";
         for my $msg (@{$diff->{messages}}) {
            #say ref $msg;
-           &{$self->{on_update}}($msg) if $self->{on_update};
+           $self->{_tg}{on_update}->($msg) if $self->{_tg}{on_update};
         }
 
         #$self->{_tg}->invoke( Telegram::Updates::GetChannelDifference->new(
@@ -354,7 +354,7 @@ sub _handle_channel_diff
     }
     for my $msg (@{$diff->{new_messages}}) {
         #say ref $msg;
-        &{$self->{on_update}}($msg) if $self->{on_update};
+        $self->{_tg}{on_update}->($msg) if $self->{_tg}{on_update};
     }
 }
 
