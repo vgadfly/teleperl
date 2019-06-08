@@ -84,7 +84,7 @@ sub sync
 sub _lock
 {
     my $self = shift;
-    AE::log debug => "locking updates queue";
+    AE::log warn => "locking updates queue";
     $self->{_lock} = 1;
 }
 
@@ -93,7 +93,7 @@ sub _unlock
     my $self = shift;
     local $_;
 
-    AE::log debug => "unlocking updates queue";
+    AE::log warn => "unlocking updates queue";
     # process queue
     $self->_do_handle_updates($_) while ($_ = shift @{$self->{_q}});
     
@@ -147,7 +147,7 @@ sub _debug_print_update
 {
     my ($self, $upd) = @_;
 
-    AE::log debug => __LINE__ . " " . ref $upd;
+    AE::log warn => __LINE__ . " " . ref $upd;
     
     if ($upd->isa('Telegram::Update::UpdateNewChannelMessage')) {
         my $ch_id = $upd->{message}{to_id}{channel_id};
@@ -158,7 +158,7 @@ sub _debug_print_update
         AE::log debug => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{pts}"
             if (exists $upd->{pts});
     }
-    AE::log debug => "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
+    AE::log warn => "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
 
 }
 
@@ -217,7 +217,7 @@ sub _handle_update
             $upd->isa('Telegram::UpdateNewChannelMessage') or
             $upd->isa('Telegram::UpdateNewMessage')
         ) {
-            &{$self->{on_update}}($upd->{message}) if $self->{on_update};
+            $self->{_tg}{on_update}->($upd->{message}) if $self->{_tg}{on_update};
         }
     }
         # TODO: separate messages from other updates
@@ -231,7 +231,7 @@ sub _handle_short_update
     my ($self, $upd) = @_;
 
     my $in_msg = $self->message_from_update( $upd );
-    &{$self->{on_update}}( $in_msg ) if $self->{on_update};
+    $self->{_tg}{on_update}->( $in_msg ) if $self->{_tg}{on_update};
 }
 
 ## store seq and date
@@ -291,15 +291,15 @@ sub _handle_upd_diff
     $self->{session}{date} = $upd_state->{date};
     $self->{session}{pts} = $upd_state->{pts};
     
-    $self->_cache_users(@{$diff->{users}});
-    $self->_cache_chats(@{$diff->{chats}});
+    $self->{_tg}->_cache_users(@{$diff->{users}});
+    $self->{_tg}->_cache_chats(@{$diff->{chats}});
     
     for my $upd (@{$diff->{other_updates}}) {
         $self->_handle_update( $upd );
     }
     for my $msg (@{$diff->{new_messages}}) {
         #say ref $msg;
-        &{$self->{on_update}}($msg) if $self->{on_update};
+        $self->{_tg}{on_update}->($msg) if $self->{_tg}{on_update};
     }
 
     $self->_unlock if $unlock;
@@ -323,8 +323,8 @@ sub _handle_channel_diff
   
     if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
         AE::log warn => "ChannelDifferenceTooLong";
-        $self->_cache_users(@{$diff->{users}});
-        $self->_cache_chats(@{$diff->{chats}});
+        $self->{_tg}->_cache_users(@{$diff->{users}});
+        $self->{_tg}->_cache_chats(@{$diff->{chats}});
         $self->{session}{channel_pts}{$channel} = $diff->{pts};  
         AE::log info => "old pts=",$self->{session}{channel_pts}{$channel};
         AE::log info => "new pts=$diff->{pts}";
@@ -346,8 +346,8 @@ sub _handle_channel_diff
     AE::log debug => "channel=$channel, new pts=$diff->{pts}" if $self->{debug};
     $self->{session}{channel_pts}{$channel} = $diff->{pts};  
 
-    $self->_cache_users(@{$diff->{users}});
-    $self->_cache_chats(@{$diff->{chats}});
+    $self->{_tg}->_cache_users(@{$diff->{users}});
+    $self->{_tg}->_cache_chats(@{$diff->{chats}});
     
     for my $upd (@{$diff->{other_updates}}) {
         $self->_handle_update( $upd );
@@ -391,8 +391,8 @@ sub _do_handle_updates
     # XXX: UpdatesCombined
     # regular updates
     if ( $updates->isa('Telegram::Updates') ) {
-        $self->_cache_users( @{$updates->{users}} );
-        $self->_cache_chats( @{$updates->{chats}} );
+        $self->{_tg}->_cache_users( @{$updates->{users}} );
+        $self->{_tg}->_cache_chats( @{$updates->{chats}} );
         $self->_store_seq_date( $updates->{seq}, $updates->{date} );
         
         for my $upd ( @{$updates->{updates}} ) {
@@ -415,6 +415,29 @@ sub _do_handle_updates
             sub { $self->_handle_upd_diff(@_) } 
         );
     }
+}
+
+# XXX: exists only for unification, handle short updates elsewhere
+sub message_from_update
+{
+    my ($self, $upd) = @_;
+    
+    local $_;
+    my %arg;
+
+    for ( qw( out mentioned media_unread silent id fwd_from via_bot_id 
+        reply_to_msg_id date message entities ) ) 
+    {
+        $arg{$_} = $upd->{$_} if exists $upd->{$_};
+    }
+    # some updates have user_id, some from_id
+    $arg{from_id} = $upd->{user_id} if (exists $upd->{user_id});
+    $arg{from_id} = $upd->{from_id} if (exists $upd->{from_id});
+
+    # chat_id
+    $arg{to_id} = $upd->{chat_id} if (exists $upd->{chat_id});
+
+    return Telegram::Message->new( %arg );
 }
 
 1;

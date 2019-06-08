@@ -120,7 +120,8 @@ sub _mt
             on_error => $self->_get_err_cb, on_message => $self->_get_msg_cb,
             debug => $self->{debug}
     );
-    $mt->reg_cb( state => sub { AE::log debug => "state @_" } );
+    $mt->reg_cb( state => sub { shift; AE::log debug => "MTP state @_" } );
+    $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_" } );
     $mt->start_session;
     $self->{_mt} = $mt;
 
@@ -328,28 +329,6 @@ sub _get_msg_cb
         $self->{_upd}->handle_updates( $msg->{object} )
             if ( $msg->{object}->isa('Telegram::UpdatesABC') );
     }
-}
-
-sub message_from_update
-{
-    my ($self, $upd) = @_;
-    
-    local $_;
-    my %arg;
-
-    for ( qw( out mentioned media_unread silent id fwd_from via_bot_id 
-        reply_to_msg_id date message entities ) ) 
-    {
-        $arg{$_} = $upd->{$_} if exists $upd->{$_};
-    }
-    # some updates have user_id, some from_id
-    $arg{from_id} = $upd->{user_id} if (exists $upd->{user_id});
-    $arg{from_id} = $upd->{from_id} if (exists $upd->{from_id});
-
-    # chat_id
-    $arg{to_id} = $upd->{chat_id} if (exists $upd->{chat_id});
-
-    return Telegram::Message->new( %arg );
 }
 
 sub get_messages
