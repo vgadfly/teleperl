@@ -109,7 +109,7 @@ sub _check_pts
         $self->{session}{pts};
 
     if (defined $local_pts and $local_pts + $count < $pts) {
-        AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"") if $self->{debug};
+        AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"");
         if (defined $channel) {
             my $channel_peer = $self->peer_from_id( $channel );
             $self->{_tg}->invoke( Telegram::Updates::GetChannelDifference->new(
@@ -343,7 +343,7 @@ sub _handle_channel_diff
         #) if defined $channel_peer;
         return;
     }
-    AE::log debug => "channel=$channel, new pts=$diff->{pts}" if $self->{debug};
+    AE::log debug => "channel=$channel, new pts=$diff->{pts}" ;
     $self->{session}{channel_pts}{$channel} = $diff->{pts};  
 
     $self->{_tg}->_cache_users(@{$diff->{users}});
