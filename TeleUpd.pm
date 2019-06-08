@@ -111,7 +111,7 @@ sub _check_pts
     if (defined $local_pts and $local_pts + $count < $pts) {
         AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"");
         if (defined $channel) {
-            my $channel_peer = $self->peer_from_id( $channel );
+            my $channel_peer = $self->{_tg}->peer_from_id( $channel );
             $self->{_tg}->invoke( Telegram::Updates::GetChannelDifference->new(
                 channel => $channel_peer,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
@@ -171,7 +171,7 @@ sub _handle_update
     $self->_debug_print_update($upd);
     
     if ($upd->isa('Telegram::UpdateChannelTooLong')) {
-        my $channel = $self->peer_from_id( $upd->{channel_id} );
+        my $channel = $self->{_tg}->peer_from_id( $upd->{channel_id} );
         my $local_pts = $self->{session}{channel_pts}{$upd->{channel_id}};
         AE::log warn => "rcvd ChannelTooLong for $upd->{channel_id} but no local pts thus no updates"
             unless defined $local_pts;
