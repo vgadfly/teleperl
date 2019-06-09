@@ -164,7 +164,7 @@ sub _real_invoke
     $self->{_req}{$req_id}{query} = $query;
     $self->{_req}{$req_id}{cb} = $cb if defined $cb;
     AE::log debug => "invoked $req_id for " . ref $query;
-    &{$self->{after_invoke}}($req_id, $query, $res_cb) if defined $self->{after_invoke};
+    &{$self->{after_invoke}}($req_id, $query, $cb) if defined $self->{after_invoke};
 }
 
 ## layer wrapper
@@ -585,19 +585,21 @@ sub _handle_rpc_result
     my ($self, $res) = @_;
 
     my $req_id = $res->{req_msg_id};
-    AE::log debug => "Got result for $req_id" if $self->{debug};
+    my $defer = 0;
+    AE::log debug => "Got result %s for $req_id", ref $res->{result} if $self->{debug};
+    if ($res->{result}->isa('MTProto::RpcError')) {
+        $defer = $self->_handle_rpc_error($res->{result}, $req_id);
+    }
     if (defined $self->{_req}{$req_id}{cb}) {
         &{$self->{_req}{$req_id}{cb}}( $res->{result} );
     }
-    delete $self->{_req}{$req_id};
-    if ($res->{result}->isa('MTProto::RpcError')) {
-        $self->_handle_rpc_error($res->{result}, $req_id);
-    }
+    delete $self->{_req}{$req_id} unless $defer;;
 }
 
 sub _handle_rpc_error
 {
     my ($self, $err, $req_id) = @_;
+    my $defer = 0;
 
     &{$self->{on_error}}($err) if defined $self->{on_error};
     $self->{error} = $err;
@@ -614,6 +616,7 @@ sub _handle_rpc_error
         $to =~ s/FLOOD_WAIT_//;
         
         AE::log error => "chill for $to sec";
+        $defer = 1;
         $self->{_lock} = 1;
         $self->{_flood_timer} = AE::timer($to, 0, sub {
                 AE::log error => "resend $req_id";
@@ -627,6 +630,7 @@ sub _handle_rpc_error
             delete $self->{_req}{$req_id}; 
         });
     }
+    return $defer;
 }
 
 sub _get_err_cb
@@ -658,7 +662,7 @@ sub _get_msg_cb
     my $self = shift;
     return sub {
         my $msg = shift;
-        AE::log info => __LINE__ . " " . ref $msg;
+        AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
         AE::log trace => Dumper $msg->{object} if $self->{debug};
         &{$self->{on_raw_msg}}( $msg->{object} ) if $self->{on_raw_msg};
 
