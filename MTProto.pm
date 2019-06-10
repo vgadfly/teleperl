@@ -671,17 +671,19 @@ sub _handle_msg
                 # start new session
                 $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
                 $self->{session}{seq} = 0;
+                # XXX: send with new seq_no!
                 $self->resend($m->{object}{bad_msg_id});
             }
             else {
                 # other errors, that cannot be fixed in runtime
+                # XXX: handle 16 and 17, sync clock
                 $self->_fatal("error $ecode");
             }
         }
-        if ($m->{object}->isa('MTProto::NewSessionCreated')) {
-            $self->{session}{seq} = 0;
+        #if ($m->{object}->isa('MTProto::NewSessionCreated')) {
+            # NO! $self->{session}{seq} = 0;
             #$self->emit('new_session');
-        }
+        #}
         if ($m->{object}->isa('MTProto::RpcResult')) {
             delete $self->{_pending}{$m->{object}{req_msg_id}};
         }
