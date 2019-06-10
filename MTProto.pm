@@ -542,6 +542,7 @@ sub send
     }
 }
 
+# XXX: msg_id may be stale
 sub _real_send
 {
     my ($self, $msg) = @_;
@@ -662,19 +663,26 @@ sub _handle_msg
             my $ecode = $m->{object}{error_code};
             my $bad_msg = $m->{object}{bad_msg_id};
             AE::log warn => "error $ecode recvd for $bad_msg";
-            # no way to destroy current session defined
-            #$self->invoke(MTProto::DestroySession->new( 
-            #        session_id => unpack( "Q<", $self->{session}->{session_id} )
-            #));
-            $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
-            $self->{session}{seq} = 0;
+            if ( $ecode == 20 or $ecode == 32 or $ecode == 33 ) {
+                # 20: message too old
+                # 32: msg_seqno too low
+                # 33: msg_seqno too high
+                #
+                # start new session
+                $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+                $self->{session}{seq} = 0;
+                $self->resend($m->{object}{bad_msg_id});
+            }
+            else {
+                # other errors, that cannot be fixed in runtime
+                $self->_fatal("error $ecode");
+            }
         }
         if ($m->{object}->isa('MTProto::NewSessionCreated')) {
-            # seq is 1, acked below
-            #$self->_ack($m->{msg_id}) if $self->{noack};
+            $self->{session}{seq} = 0;
+            #$self->emit('new_session');
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {
-            # XXX: result can be packed
             delete $self->{_pending}{$m->{object}{req_msg_id}};
         }
         if (($m->{seq} & 1) and not $self->{noack}) {

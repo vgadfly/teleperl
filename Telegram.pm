@@ -328,6 +328,11 @@ sub _get_msg_cb
         # Updates
         $self->{_upd}->handle_updates( $msg->{object} )
             if ( $msg->{object}->isa('Telegram::UpdatesABC') );
+
+        # New session created, some updates can be missing
+        if ( $msg->{object}->isa('MTProto::NewSessionCreated') ) {
+
+        }
     }
 }
 
