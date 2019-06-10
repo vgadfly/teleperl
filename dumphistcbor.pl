@@ -32,16 +32,24 @@ sub option_spec {
     [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log', {default=>0}],
     [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
-    [ 'logfile|l=s' => 'path to log file', { default => "cborsave.log" }    ],
-    [ 'prefix|p=s'  => 'directory where create files', { default => '.' }   ],
+    [ 'logfile|l=s' => 'path to log file', { default => "$0.log" }          ],
+    [ 'file|f=s'    => 'CBOR file name for dump', { required => 1  }        ],
+    [ "offset_id=i"     => "same named API param, default 0"  ],
+    [ "offset_date=i"   => "same named API param, default 0"  ],
+    [ "add_offset=i"    => "same named API param, default 0"  ],
+    [ "limit=i"         => "same named API param, default 10" ],
+    [ "max_id=i"        => "same named API param, default 0"  ],
+    [ "min_id=i"        => "same named API param, default 0"  ],
 }
 
 ### initialization
 
 my ($opts, $usage);
 
-eval { ($opts, $usage) = describe_options( '%c %o ...', option_spec() ) };
+eval { ($opts, $usage) = describe_options( '%c %o <peer>', option_spec() ) };
 die "Invalid opts: $@\nUsage: $usage\n" if $@;
+
+die "user/chat must be specified" unless defined $ARGV[0];
 
 my $session = retrieve( $opts->session ) if -e $opts->session;
 my $conf = Config::Tiny->read($opts->config);
@@ -105,7 +113,7 @@ my $tg = Telegram->new(
     noupdate => $opts->{noupdate},
     debug => $opts->{debug}
 );
-$tg->{on_raw_msg} = \&one_message;
+#$tg->{on_raw_msg} = \&one_message;
 $tg->{after_invoke} = \&after_invoke;
 
 my $cbor = CBOR::XS->new->pack_strings(1);
@@ -151,7 +159,7 @@ sub one_message {
 
     push @clones, +{ time => time, in => $clone };
 
-    _pack() if @clones > 254;   # one byte economy :)
+    _pack() if @clones > 512; # XXX what's balance b. often vs compress ratio?
 };
 
 # NOTE this doesn't make sense here in right this daemon - serves mostly
@@ -159,11 +167,10 @@ sub one_message {
 sub after_invoke {
     my ($req_id, $query, $res_cb) = @_;
 
-    my $cbname;
-    $cbname= eval {
+    my $cbname = eval {
         require Sub::Util;
         Sub::Util::subname($res_cb);
-    } if defined $res_cb;
+    };
 
     # XXX workaround of 'use fields' :(
     my $clone = dclone $query;
@@ -185,10 +192,8 @@ sub _pack {
     @clones = ();
 }
 
-# to be redefined in customary versions e.g. specialized dumpers
 sub get_fname {
-    my $fname = POSIX::strftime("%Y.%m.%d_%H", localtime);
-    $fname = "$opts->{prefix}/$fname.cbor";
+    return $opts->file;
 }
 
 sub save_cbor {
@@ -243,17 +248,80 @@ $tg->start;
 # XXX socks5 crutch!
 AnyEvent->_poll until defined $tg->{_mt};
 
-# subscribe to updates by any high-level query
+my $cond = AnyEvent->condvar;
+
+# XXX FIXME make first request dummy 'coz error 32 possible :(
 $tg->invoke(
     Telegram::Messages::GetDialogs->new(
         offset_date => 0,
         offset_id => 0,
         offset_peer => Telegram::InputPeerEmpty->new,
         limit => -1
-    ), \&one_message
+    ), sub { "noop" }
 );
 
-my $cond = AnyEvent->condvar;
+my $peer = $ARGV[0];
+
+if ($peer eq 'self') {
+    $peer = Telegram::InputPeerSelf->new;
+}
+else {
+    $peer = $tg->name_to_id($peer);
+    $peer = $tg->peer_from_id($peer);
+}
+die "unknown user/chat" unless defined $peer;
+
+sub handle_history
+{
+    my ($peer, $messages, $ptop, $opts) = @_;
+
+    AE::log debug => "ptop=%d %s", $ptop, ($ptop < 2 ? Dumper($messages) : ref $messages);
+    my $top = 0;
+    $tg->_cache_users(@{$messages->{users}}) ;
+    for my $upd (@{$messages->{messages}}) {
+        $top = $upd->{id};
+        AE::log debug => "top=%d", $top;
+        $opts->{limit}-- if $opts->{limit};
+#        if ($upd->isa('Telegram::Message')) {
+            one_message($upd);
+#        }
+    }
+    $cond->send, return unless $top;    # if bottom reached, slice will be empty
+    if ($ptop == 0 or $top < $ptop && ($opts->{limit} // 1)) {
+        $tg->invoke( Telegram::Messages::GetHistory->new(
+                peer => $peer,
+                offset_id => $top,
+                offset_date	=> $opts->{offset_date} // 0,
+                add_offset	=> $opts->{add_offset} // 0,
+                limit	=> $opts->{limit}  || 10,
+                max_id	=> $opts->{max_id} || 0,
+                min_id	=> $opts->{min_id} || 0,
+                hash => 0
+            ), sub {
+                handle_history($peer, $_[0], $top, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
+            }
+        );
+    }
+}
+
+my $req = AnyEvent->timer(
+    after => 3,
+    cb => sub {
+        $tg->invoke( Telegram::Messages::GetHistory->new(
+                peer => $peer,
+                offset_id	=> $opts->{offset_id} // 0,
+                offset_date	=> $opts->{offset_date} // 0,
+                add_offset	=> $opts->{add_offset} // 0,
+                limit	=> $opts->{limit} // 10,
+                max_id	=> $opts->{max_id} // 0,
+                min_id	=> $opts->{min_id} // 0,
+                hash => 0
+            ), sub {
+                handle_history($peer, $_[0], 0, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
+
+        } );
+    }
+);
 
 my $save_i = 1;
 my $watch = AnyEvent->timer(
@@ -267,13 +335,17 @@ my $watch = AnyEvent->timer(
 );
 
 my $signal;
+
+$SIG{TERM} = sub {
+    AE::log note => "INT recvd";
+    $cond->send;
+};
+# XXX should work in console, not under wperl.exe
 if ($^O ne 'MSWin32') {
-    $signal = AnyEvent->signal( signal => 'INT', cb => sub {
-            AE::log note => "INT recvd";
-            $cond->send;
-        }
-    );
-}
+    $signal = AnyEvent->signal( signal => 'INT', cb => $SIG{TERM}  );
+}# else {
+    $SIG{INT} = $SIG{TERM};
+
 
 $cond->recv;
 save_cbor() if @clones;

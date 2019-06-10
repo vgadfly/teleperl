@@ -137,18 +137,18 @@ sub init {
 
 sub command_map
 {
-    argobject   => 'Teleperl::Command::Argobject',
-    chats       => 'Teleperl::Command::Chats',
-    dialogs     => 'Teleperl::Command::Dialogs',
-    history     => 'Teleperl::Command::History',
-    invoke      => 'Teleperl::Command::Invoke',
-    media       => 'Teleperl::Command::Media',
-    message     => 'Teleperl::Command::Message',
-    'read'      => 'Teleperl::Command::Read',
-    sessions    => 'Teleperl::Command::Sessions',
-    set         => 'Teleperl::Command::Set',
-    updates     => 'Teleperl::Command::Updates',
-    users       => 'Teleperl::Command::Users',
+    argobject   => 'CliTg::Command::Argobject',
+    chats       => 'CliTg::Command::Chats',
+    dialogs     => 'CliTg::Command::Dialogs',
+    history     => 'CliTg::Command::History',
+    invoke      => 'CliTg::Command::Invoke',
+    media       => 'CliTg::Command::Media',
+    message     => 'CliTg::Command::Message',
+    'read'      => 'CliTg::Command::Read',
+    sessions    => 'CliTg::Command::Sessions',
+    set         => 'CliTg::Command::Set',
+    updates     => 'CliTg::Command::Updates',
+    users       => 'CliTg::Command::Users',
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
@@ -282,7 +282,7 @@ sub report_update
     }
 }
 
-package Teleperl::Command::Message;
+package CliTg::Command::Message;
 use base "CLI::Framework::Command";
 
 use Telegram::MessageEntity;
@@ -371,10 +371,10 @@ sub run
     );
 }
 
-package Teleperl::Command::Set;
+package CliTg::Command::Set;
 use base "CLI::Framework::Command::Meta";
 
-*option_spec = \&Teleperl::settable_opts;
+*option_spec = \&CliTg::settable_opts;
 
 sub run
 {
@@ -403,7 +403,7 @@ sub run
     return $ret || "no opts changed";
 }
 
-package Teleperl::Command::Dialogs;
+package CliTg::Command::Dialogs;
 use base "CLI::Framework::Command::Meta";
 
 use Data::Dumper;
@@ -521,7 +521,7 @@ sub run
     );
 }
 
-package Teleperl::Command::Media;
+package CliTg::Command::Media;
 use base "CLI::Framework::Command";
 
 use Telegram::Messages::SendMedia;
@@ -544,7 +544,7 @@ sub run
     );
 }
 
-package Teleperl::Command::Users;
+package CliTg::Command::Users;
 use base "CLI::Framework::Command";
 
 use Data::Dumper;
@@ -557,7 +557,7 @@ sub run
     return Dumper $tg->{session}{users};
 }
 
-package Teleperl::Command::Chats;
+package CliTg::Command::Chats;
 use base "CLI::Framework::Command";
 
 use Data::Dumper;
@@ -570,7 +570,7 @@ sub run
     return Dumper $tg->{session}{chats};
 }
 
-package Teleperl::Command::Updates;
+package CliTg::Command::Updates;
 use base "CLI::Framework::Command::Meta";
 
 use Telegram::Updates::GetState;
@@ -595,7 +595,7 @@ sub run
     #    ), sub {say Dumper @_});
 }
 
-package Teleperl::Command::History;
+package CliTg::Command::History;
 use base "CLI::Framework::Command::Meta";
 
 use Telegram::InputPeer;
@@ -686,12 +686,12 @@ sub run
             min_id	=> $opts->{min_id} // 0,
             hash => 0
         ), sub {
-            $self->handle_history($peer, $_[0], $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
+            $self->handle_history($peer, $_[0], 0, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
 
         } );
 }
 
-package Teleperl::Command::Read;
+package CliTg::Command::Read;
 use base "CLI::Framework::Command::Meta";
 
 use Telegram::Messages::ReadHistory;
@@ -749,7 +749,7 @@ sub run
     }
 }
 
-package Teleperl::Command::Sessions;
+package CliTg::Command::Sessions;
 use base "CLI::Framework::Command::Meta";
 
 use Telegram::Account::GetAuthorizations;
@@ -764,7 +764,7 @@ sub run
     $tg->invoke( Telegram::Account::GetAuthorizations->new, sub { $self->get_app->render(Dumper @_) } );
 }
 
-package Teleperl::Command::Invoke;
+package CliTg::Command::Invoke;
 use base "CLI::Framework::Command::Meta";
 
 use Telegram::ObjTable;
@@ -895,7 +895,7 @@ sub run
     );
 }
 
-package Teleperl::Command::Argobject;
+package CliTg::Command::Argobject;
 use base "CLI::Framework::Command::Meta";
 
 sub usage_text {
@@ -957,8 +957,8 @@ sub notify_of_subcommand_dispatch {
     $self->cache->set('_argobjarr' => $argobj);
 }
 
-package Teleperl::Command::Argobject::Push;
-use base "Teleperl::Command::Argobject";
+package CliTg::Command::Argobject::Push;
+use base "CliTg::Command::Argobject";
 
 use Telegram::ObjTable;
 use Data::Dumper;
@@ -1046,8 +1046,8 @@ sub run
     return $#$argo;
 }
 
-package Teleperl::Command::Argobject::InputPeer;
-use base "Teleperl::Command::Argobject";
+package CliTg::Command::Argobject::InputPeer;
+use base "CliTg::Command::Argobject";
 
 use Telegram::InputPeer;
 
@@ -1097,8 +1097,8 @@ sub run
     return $#$argo;
 }
 
-package Teleperl::Command::Argobject::Delete;
-use base "Teleperl::Command::Argobject";
+package CliTg::Command::Argobject::Delete;
+use base "CliTg::Command::Argobject";
 
 sub validate
 {
@@ -1126,8 +1126,8 @@ sub run {
     return "Deleted $ret";
 }
 
-package Teleperl::Command::Argobject::Dump;
-use base "Teleperl::Command::Argobject";
+package CliTg::Command::Argobject::Dump;
+use base "CliTg::Command::Argobject";
 
 use Data::Dumper;
 
@@ -1138,8 +1138,8 @@ sub run {
     return Dumper $self->cache->get('_argobjarr');
 }
 
-package Teleperl::Command::Argobject::Pop;
-use base "Teleperl::Command::Argobject";
+package CliTg::Command::Argobject::Pop;
+use base "CliTg::Command::Argobject";
 
 use Data::Dumper;
 
@@ -1151,8 +1151,8 @@ sub run {
     return Dumper(pop @$argo);
 }
 
-package Teleperl::Command::Argobject::Shift;
-use base "Teleperl::Command::Argobject";
+package CliTg::Command::Argobject::Shift;
+use base "CliTg::Command::Argobject";
 
 use Data::Dumper;
 

@@ -33,8 +33,9 @@ For GUI application (currently minimal almost unusable quick & dirty proof-of-wo
   * treectrl
   * tklib (ctext tooltip widget)
 
-Not required in minimal run (optional for extra features):
+Not required in minimal run (optional for extra features), but may be moved to core in future:
 - CBOR::XS
+- Data::DPath
 
 Not yet used but discussed:
 - Template::Toolkit
