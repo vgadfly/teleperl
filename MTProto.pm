@@ -280,6 +280,7 @@ sub _phase_one
     die unless @stream;
 
     my $res_pq = TL::Object::unpack_obj( \@stream );
+    AE::log debug => Dumper $res_pq;
     die unless $res_pq->isa("MTProto::ResPQ");
 
     AE::log debug => "got ResPQ\n" if $self->{debug};
@@ -324,9 +325,7 @@ sub _phase_one
     $req_dh->{public_key_fingerprint} = Keys::key_fingerprint($rsa);
     $req_dh->{encrypted_data} = $enc_data;
 
-    $self->{_handle_plain} = sub {
-            $self->_phase_two(@_)
-    };
+    $self->_state('phase_two');
     $self->_send_plain( pack( "(a4)*", $req_dh->pack ) );
 }
 
@@ -410,9 +409,7 @@ sub _phase_two
     # session auth key
     $self->{session}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
 
-    $self->{_handle_plain} = sub {
-        $self->_phase_three(@_)
-    };
+    $self->_state('phase_three');
     $self->_send_plain( pack( "(a4)*", $dh_par->pack ) );
 }
 
@@ -458,6 +455,7 @@ sub _phase_three
     # ecrypted connection established
     $self->{_plain} = 0;
     delete $self->{_pq};
+    $self->_state('session_ok');
     # process message queue
     $self->_dequeue;
 }
@@ -519,12 +517,16 @@ sub _dequeue
 ##
 ## multiple messages may be packed together
 ##
+## each message is an array ref [ data, cb, is_service ]
+##
+## cb is a coderef, recvs message id, when it is acked
+## service messages are not waiting to be acked
 sub send
 {
     my ($self, @msg) = @_;
     local $_;
 
-    AE::log info => "sending ".ref($_)." \n" for @msg;
+    #AE::log info => "sending ".ref($_)." \n" for @msg;
     
     # XXX: just use lock in new
     # check if session is ready
@@ -548,17 +550,22 @@ sub _real_send
     my ($self, $msg) = @_;
     
     $self->{_lock} = 1;
+    my ($obj, $id_cb, $is_service) = @$msg;
+    my $seq = $self->{session}{seq};
+    $seq += 1 unless $is_service;
+    my $message = MTProto::Message->new( $seq, $obj );
+    $self->{session}{seq} += 2 unless $is_service;
+    $self->{_pending}{$message->{msg_id}} = $msg unless $is_service;
 
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
         $self->{_aeh}->push_write( pack( "L", 0xeeeeeeee ) );
         $self->{_tcp_first} = 0;
     }
-    croak "not MTProto::Message" unless $msg->isa('MTProto::Message');
     
-    my $payload = $msg->pack;
+    my $payload = $message->pack;
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
-        -(12+length($msg->{data})) % 16 + 12 );
+        -(12+length($message->{data})) % 16 + 12 );
 
     my $plain = $self->{session}{salt} . $self->{session}{session_id} . $payload . $pad;
 
@@ -569,7 +576,7 @@ sub _real_send
     my $packet = $self->{session}{auth_key_id} . $msg_key . $enc_data;
 
     if ($self->{debug}) {
-        AE::log debug => "sending $msg->{seq}:$msg->{msg_id}, ".length($packet). " bytes encrypted\n";
+        AE::log debug => "sending $message->{seq}:$message->{msg_id}, ".length($packet). " bytes encrypted\n";
     }
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
 }
@@ -652,7 +659,10 @@ sub _handle_msg
             delete $self->{_pending}{$m->{object}{msg_id}};
         }
         if ($m->{object}->isa('MTProto::MsgsAck')) {
-            delete $self->{_pending}{$_} for @{$m->{object}{msg_ids}};
+            for (@{$m->{object}{msg_ids}}) {
+                $self->{_pending}{$_}[1]->($_) if defined $self->{_pending}{$_}[1];
+                delete $self->{_pending}{$_};
+            }
         }
         if ($m->{object}->isa('MTProto::BadServerSalt')) {
             $self->{session}{salt} = pack "Q<", $m->{object}{new_server_salt};
@@ -685,7 +695,9 @@ sub _handle_msg
             #$self->emit('new_session');
         #}
         if ($m->{object}->isa('MTProto::RpcResult')) {
-            delete $self->{_pending}{$m->{object}{req_msg_id}};
+            my $id = $m->{object}{req_msg_id};
+            $self->{_pending}{$id}[1]->($id) if defined $self->{_pending}{$id}[1];
+            delete $self->{_pending}{$id};
         }
         if (($m->{seq} & 1) and not $self->{noack}) {
             # ack content-related messages
@@ -735,7 +747,7 @@ sub _ack
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
     #$ack->{msg_ids} = \@msg_ids;
-    $self->invoke( $ack, 1, 1 );
+    $self->send( [$ack, undef, 1] );
 }
 
 ## resend message by id, if it's pending (was not ACKed)
@@ -752,16 +764,18 @@ sub resend
 ## pack object and send it; return msg_id
 sub invoke
 {
-    my ($self, $obj, $is_service, $noack) = @_;
-
-    my $seq = $self->{session}{seq};
-    $seq += 1 unless $is_service;
-    my $msg = MTProto::Message->new( $seq, $obj );
-    $self->{session}{seq} += 2 unless $is_service;
-    $self->send($msg);
-    $self->{_pending}{$msg->{msg_id}} = $msg unless $noack;
-    AE::log debug => "invoked $msg->{msg_id} (seq now is $self->{session}{seq})";
-    return $msg->{msg_id};
+    goto &MTProto::send;
+    
+    #    my ($self, $obj, $is_service, $noack) = @_;
+    #
+    #    my $seq = $self->{session}{seq};
+    #    $seq += 1 unless $is_service;
+    #    my $msg = MTProto::Message->new( $seq, $obj );
+    #    $self->{session}{seq} += 2 unless $is_service;
+    #    $self->send($msg);
+    #    $self->{_pending}{$msg->{msg_id}} = $msg unless $noack;
+    #    AE::log debug => "invoked $msg->{msg_id} (seq now is $self->{session}{seq})";
+    #    return $msg->{msg_id};
 }
 
 1;

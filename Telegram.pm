@@ -139,11 +139,15 @@ sub run_updates {
 sub _real_invoke
 {
     my ( $self, $query, $cb ) = @_;
-    my $req_id = $self->{_mt}->invoke( $query );
-    $self->{_req}{$req_id}{query} = $query;
-    $self->{_req}{$req_id}{cb} = $cb if defined $cb;
-    AE::log debug => "invoked $req_id for " . ref $query;
-    &{$self->{after_invoke}}($req_id, $query, $cb) if defined $self->{after_invoke};
+    $self->{_mt}->invoke( [ $query, 
+        sub {
+            my $req_id = shift;
+            $self->{_req}{$req_id}{query} = $query;
+            $self->{_req}{$req_id}{cb} = $cb if defined $cb;
+            AE::log debug => "invoked $req_id for " . ref $query;
+            &{$self->{after_invoke}}($req_id, $query, $cb) if defined $self->{after_invoke};
+        } 
+    ] );
 }
 
 ## layer wrapper
