@@ -48,6 +48,7 @@ use Telegram::Messages::SendMessage;
 # input
 use Telegram::InputPeer;
 
+use base 'Class::Stateful';
 use fields qw(
     _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
     _queue _upd reconnect session debug keepalive noupdate error
@@ -60,6 +61,13 @@ sub new
     my @args = qw( on_update on_error on_raw_msg after_invoke noupdate debug keepalive reconnect );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
+    $self = $self->SUPER::new( 
+        init => undef,
+        connecting => undef,
+        connected => [ sub { $self->_dequeue }, sub { $self->{_lock} = 1 } ],
+        idle => undef
+    );
+    $self->_state('init');
     
     $self->{_dc} = $arg{dc};
     $self->{_proxy} = $arg{proxy};
@@ -86,11 +94,13 @@ sub start
     my $self = shift;
     my $aeh;
 
+    $self->_state('connecting');
+
     if (defined $self->{_proxy}) {
         AE::log info => "using proxy %s:%d", map { $self->{_proxy}{$_} } qw/addr port/;
         $aeh = AnyEvent::Handle->new( 
             connect => [ map{ $self->{_proxy}{$_}} qw/addr port/ ],
-            on_connect_error => sub { die "Connection error" },
+            on_connect_error => sub { $self->_fatal("Connection error") },
             on_connect => sub {
                 my $socks = AnyEventSocks->new(
                     hd => $aeh, 
@@ -106,7 +116,7 @@ sub start
         AE::log info => "not using proxy: %s:%d", map{ $self->{_dc}{$_}} qw/addr port/;
         $aeh = AnyEvent::Handle->new( 
             connect => [ map{ $self->{_dc}{$_}} qw/addr port/ ],
-            on_connect_error => sub { die "Connection error" },
+            on_connect_error => sub { $self->_fatal("Connection error") },
             on_connect => sub { $self->_mt($aeh) }
         );
     }
@@ -121,9 +131,10 @@ sub _mt
             debug => $self->{debug}
     );
     $mt->reg_cb( state => sub { shift; AE::log debug => "MTP state @_" } );
-    $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_" } );
+    $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
     $mt->start_session;
     $self->{_mt} = $mt;
+    $self->_state('connected');
 
     $self->run_updates unless $self->{noupdate};
     $self->_dequeue; # unlock
@@ -157,6 +168,7 @@ sub invoke
     my ($self, $query, $res_cb) = @_;
     my $req_id;
 
+    die unless defined $query;
     AE::log info => "invoke: " . ref $query;
     AE::log trace => Dumper $query if $self->{debug};
     if ($self->{_first}) {
@@ -245,12 +257,14 @@ sub _handle_rpc_result
 
     my $req_id = $res->{req_msg_id};
     AE::log debug => "Got result for $req_id" if $self->{debug};
-    if (defined $self->{_req}{$req_id}{cb}) {
-        &{$self->{_req}{$req_id}{cb}}( $res->{result} );
-    }
-    delete $self->{_req}{$req_id};
     if ($res->{result}->isa('MTProto::RpcError')) {
         $self->_handle_rpc_error($res->{result}, $req_id);
+    }
+    else {
+        if (defined $self->{_req}{$req_id}{cb}) {
+            &{$self->{_req}{$req_id}{cb}}( $res->{result} );
+        }
+        delete $self->{_req}{$req_id};
     }
 }
 
@@ -273,17 +287,15 @@ sub _handle_rpc_error
         $to =~ s/FLOOD_WAIT_//;
         
         AE::log error => "chill for $to sec";
-        $self->{_lock} = 1;
+        $self->_state('idle');
+        my $q = $self->{_req}{$req_id}{query};
+        my $cb = $self->{_req}{$req_id}{cb}; 
+        # requeue the query
+        $self->invoke( $q, $cb);
+        delete $self->{_req}{$req_id}; 
         $self->{_flood_timer} = AE::timer($to, 0, sub {
-                AE::log error => "resend $req_id";
-            $self->{_lock} = 0;
-
-            my $q = $self->{_req}{$req_id}{query};
-		    my $cb = $self->{_req}{$req_id}{cb}; 
-                    AE::log warn => ref $q;
-            # requeue the query
-            $self->invoke( $q, $cb);
-            delete $self->{_req}{$req_id}; 
+                AE::log warn => "resend $req_id";
+                $self->_state('connected');
         });
     }
 }
@@ -300,7 +312,6 @@ sub _get_err_cb
                 print "reconnecting" if $self->{debug};
                 undef $self->{_mt};
                 $self->start;
-                $self->update;
             }
             else {
                 my $e = {
@@ -308,6 +319,7 @@ sub _get_err_cb
                     error_code => $err{code}
                 };
                 $self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
+                $self->_state('idle');
             }
     }
 }
@@ -576,7 +588,7 @@ sub _get_timer_cb
     return sub {
         AE::log debug => "timer tick" if $self->{debug};
         $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
-        $self->{_mt}->invoke( MTProto::Ping->new( ping_id => rand(2**31) ) ) if $self->{keepalive};
+        $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) if $self->{keepalive};
     }
 }
 

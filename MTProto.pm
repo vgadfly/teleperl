@@ -171,11 +171,16 @@ sub new
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
-    $self = $self->SUPER::new;
+    $self = $self->SUPER::new( 
+        init => undef, 
+        phase_one => undef,
+        phase_two => undef,
+        phase_three => undef,
+        session_ok => undef
+    );
     
     $self->{_tcp_first} = 1;
     $self->{_lock} = 0;
-    $self->_set_states( qw/init phase_one phase_two phase_three session_ok/ );
     $self->_state('init');
     
     @$self{@args} = @arg{@args};

@@ -8,6 +8,11 @@ use Object::Event;
 use fields qw( _state _states _fatal );
 use base 'Object::Event';
 
+use constant {
+    ON_ENTER => 0,
+    ON_LEAVE => 1
+};
+
 sub new
 {
     my $class = shift;
@@ -15,7 +20,7 @@ sub new
     #my $self = fields::new( ref $class || $class );
     my $self = bless ( {}, ref $class || $class );
     $self = $self->SUPER::new;
-    $self->{_states} = { map { $_ => undef } @_ };
+    $self->{_states} = { @_ };
     $self->{_states}{fatal} = undef;
 
     return $self;
@@ -42,12 +47,21 @@ sub _state
     my ($self, $state) = @_;
     return $self->{_state} unless defined $state;
 
+    my $current = $self->{_state};
+    if ( exists $self->{_states}{$current}[ON_LEAVE] ) {
+        $self->{_states}{$current}[ON_LEAVE]->();
+    }
+
     if ( exists $self->{_states}{$state} ) {
         $self->{_state} = $state;
         $self->event( state => $state );
+        if ( exists $self->{_states}{$state}[ON_ENTER] ) {
+            $self->{_states}{$state}[ON_ENTER]->();
+        }
     }
     else {
         $self->{_state} = 'fatal';
+        $self->{_fatal} = "Unknown state $state"; 
         $self->event( fatal => "Unknown state $state" );
     }
 }
@@ -55,7 +69,7 @@ sub _state
 sub _set_states
 {
     my $self = shift;
-    $self->{_states} = { map { $_ => undef } @_ };
+    $self->{_states} = { @_ };
     $self->{_states}{fatal} = undef;
 }
 
