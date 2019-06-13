@@ -634,11 +634,13 @@ sub handle_history
 {
     my ($self, $peer, $messages, $ptop, $opts) = @_;
     my $tg = $self->cache->get('tg');
+    AE::log debug => "handle_history ".Dumper( $peer, $ptop, $opts );
 
     my $top = 0;
     $tg->_cache_users(@{$messages->{users}}) ;
     for my $upd (@{$messages->{messages}}) {
         $top = $upd->{id};
+        AE::log debug => "history: $upd->{id}";
         $opts->{limit}-- if $opts->{limit};
         if ($upd->isa('Telegram::Message')) {
             $self->get_app->render_msg($upd);
@@ -656,7 +658,7 @@ sub handle_history
             min_id	=> $opts->{min_id} // 0,
                 hash => 0
             ), sub {
-                $self->handle_history($peer, $_[0], $top, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
+                $self->handle_history($peer, $_[0], $ptop ? $top : 0, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
             } );
     }
 }

@@ -43,6 +43,7 @@ my $proxy = new Net::SOCKS( socks_addr => $conf->{proxy}{addr},
     protocol_version => 5,
 );
 
+say "connect";
 my $sock = $proxy->connect( peer_addr => $conf->{dc}{addr}, peer_port => $conf->{dc}{port} ) or die;
     
 #my $sock = IO::Socket::INET->new(
@@ -54,6 +55,7 @@ my $sock = $proxy->connect( peer_addr => $conf->{dc}{addr}, peer_port => $conf->
 # this creates new MTProto session
 #my $mt = MTProto->new( socket => $sock, session => undef, debug => 1 );
 my $mt = MTProto->new( socket => AnyEvent::Handle->new( fh => $sock ), session => undef, debug => 1 );
+$mt->start_session;
 
 # The Query
 my $query = Telegram::Auth::SendCode->new( phone_number => $conf->{user}{phone},
@@ -73,7 +75,7 @@ my $conn = Telegram::InitConnection->new(
         lang_code => 'en',
         query => $query
 );
-
+say 'invoke';
 # Wrapper layer
 $mt->invoke( Telegram::InvokeWithLayer->new( layer => 78, query => $conn ) );
 
