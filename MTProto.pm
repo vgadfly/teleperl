@@ -68,7 +68,7 @@ package MTProto;
 use Data::Dumper;
 
 use base 'Class::Stateful';
-use fields qw( debug session on_message on_error noack last_error 
+use fields qw( debug session noack last_error 
     _lock _pending _tcp_first _aeh _pq _queue );
 
 use AnyEvent;
@@ -167,7 +167,7 @@ sub gen_aes_key
 
 sub new
 {
-    my @args = qw(session debug noack on_message on_error);
+    my @args = qw(session debug noack);
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
@@ -223,7 +223,7 @@ sub _get_error_cb
     my $self = shift;
     return sub {
         my ($hdl, $fatal, $msg) = @_;
-        $self->emit( socket_error => $msg );
+        $self->event( socket_error => $msg );
         $self->{last_error} = {message => $msg};
         $hdl->destroy;
         $self->_state('fatal');
@@ -279,11 +279,12 @@ sub _phase_one
     $data = substr($data, 20, $datalen);
     
     my @stream = unpack( "(a4)*", $data );
-    die unless @stream;
+    return $self->_fatal('no data on phase one') unless @stream;
 
     my $res_pq = TL::Object::unpack_obj( \@stream );
     AE::log debug => Dumper $res_pq;
-    die unless $res_pq->isa("MTProto::ResPQ");
+    return $self->_fatal('no ResPQ on phase one') 
+        unless $res_pq->isa("MTProto::ResPQ");
 
     AE::log debug => "got ResPQ\n" if $self->{debug};
 
@@ -313,7 +314,7 @@ sub _phase_one
     $data = "\0". sha1($data) . $data . $pad;
 
     my @keys = grep {defined} map { Keys::get_key($_) } @{$res_pq->{server_public_key_fingerprints}};
-    die "no suitable keys" unless (@keys);
+    return $self->_fatal("no suitable Keys on phase one") unless (@keys);
 
     my $rsa = $keys[0];
     $rsa->use_no_padding;
@@ -346,12 +347,13 @@ sub _phase_two
     my $server_nonce = $self->{_pq}{server_nonce};
 
     my @stream = unpack( "(a4)*", $data );
-    die unless @stream;
+    return $self->_fatal('no data on phase two') unless @stream;
 
     my $dh_params = TL::Object::unpack_obj( \@stream );
-    die unless $dh_params->isa('MTProto::ServerDHParamsOk');
+    return $self->_fatal('bad DH params: '.ref $dh_params)
+        unless $dh_params->isa('MTProto::ServerDHParamsOk');
 
-    AE::log debug => "got ServerDHParams\n" if $self->{debug};
+    AE::log debug => "got ServerDHParams";
 
     my $tmp_key = sha1( $new_nonce->to_bin() . $server_nonce->to_bin ).
             substr( sha1( $server_nonce->to_bin() . $new_nonce->to_bin ), 0, 12 );
@@ -366,15 +368,17 @@ sub _phase_two
 
     # ans with padding -> can't check digest
     @stream = unpack( "(a4)*", $ans );
-    die unless @stream;
+    return $self->_fatal('no packed data in DH params') unless @stream;
 
     my $dh_inner = TL::Object::unpack_obj( \@stream );
-    die unless $dh_inner->isa('MTProto::ServerDHInnerData');
+    $self->_fatal('bad DHInnerData: '.ref $dh_inner) 
+        unless $dh_inner->isa('MTProto::ServerDHInnerData');
     
     AE::log debug => "got ServerDHInnerData\n" if $self->{debug};
 
-    die "bad nonce" unless $dh_inner->{nonce}->equals( $nonce );
-    die "bad server_nonce" unless $dh_inner->{server_nonce}->equals( $server_nonce );
+    return $self->_fatal("bad nonce") unless $dh_inner->{nonce}->equals( $nonce );
+    return $self->_fatal("bad server_nonce") 
+        unless $dh_inner->{server_nonce}->equals( $server_nonce );
 
 #
 # STEP 3: Complete DH
@@ -431,12 +435,13 @@ sub _phase_three
     my $auth_key = $self->{session}{auth_key};
     
     my @stream = unpack( "(a4)*", $data );
-    die unless @stream;
+    return $self->_fatal('no data on phase three') unless @stream;
 
     my $result = TL::Object::unpack_obj( \@stream );
-    die unless $result->isa('MTProto::DhGenOk');
+    return $self->_fatal('DH failed: '.ref $result) 
+        unless $result->isa('MTProto::DhGenOk');
 
-    AE::log debug => "DH OK\n" if $self->{debug};
+    AE::log debug => "DH OK";
 
     # check new_nonce_hash
     my $auth_key_aux_hash = substr(sha1($auth_key), 0, 8);
@@ -444,9 +449,10 @@ sub _phase_three
 
     my $nnh = $new_nonce->to_bin . pack("C", 1) . $auth_key_aux_hash;
     $nnh = substr(sha1($nnh), -16);
-    die "bad new_nonce_hash1" unless $result->{new_nonce_hash1}->to_bin eq $nnh;
+    return $self->_fatal("bad new_nonce_hash1")
+        unless $result->{new_nonce_hash1}->to_bin eq $nnh;
 
-    AE::log debug => "session started\n" if $self->{debug};
+    AE::log debug => "session started";
 
     $self->{session}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
     $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
@@ -585,7 +591,7 @@ sub _handle_error
 {
     my ($self, $err) = @_;
     my $error = unpack( "l<", $err );
-    $self->emit( mt_error => $error );
+    $self->event( mt_error => $error );
     $self->{last_error} = { code => $error };
     $self->_state('fatal');
 }
@@ -671,13 +677,10 @@ sub _handle_msg
             else {
                 # other errors, that cannot be fixed in runtime
                 # XXX: handle 16 and 17, sync clock
-                $self->_fatal("error $ecode");
+                $self->event( mt_error => $ecode );
+                $self->_state('fatal');
             }
         }
-        #if ($m->{object}->isa('MTProto::NewSessionCreated')) {
-            # NO! $self->{session}{seq} = 0;
-            #$self->emit('new_session');
-        #}
         if ($m->{object}->isa('MTProto::RpcResult')) {
             my $id = $m->{object}{req_msg_id};
             $self->{_pending}{$id}[1]->($id) if defined $self->{_pending}{$id}[1];
@@ -689,9 +692,7 @@ sub _handle_msg
         }
 
         # pass msg to handler
-        if (exists $self->{on_message} and defined $self->{on_message}) {
-            &{$self->{on_message}}($m);
-        }
+        $self->event( message => $m );
     }
 
 }
@@ -701,11 +702,10 @@ sub _handle_encrypted
     my ($self, $data) = @_;
     my @ret;
 
-    AE::log debug => "recvd ". length($data) ." bytes encrypted\n" if $self->{debug};
+    AE::log trace => "recvd ". length($data) ." bytes encrypted\n";
 
     if (length($data) == 4) {
-        # handle error here
-        die "error ".unpack("l<", $data);
+        $self->_handle_error($data);
     }
 
     my $authkey = substr($data, 0, 8);
@@ -727,7 +727,7 @@ sub _ack
 {
     my ($self, @msg_ids) = @_;
     my ($package, $filename, $line) = caller;
-    AE::log debug => "ack " . join (",", @msg_ids), "\n" if $self->{debug};
+    AE::log trace => "ack " . join (",", @msg_ids);
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
     #$ack->{msg_ids} = \@msg_ids;
@@ -749,17 +749,6 @@ sub resend
 sub invoke
 {
     goto &MTProto::send;
-    
-    #    my ($self, $obj, $is_service, $noack) = @_;
-    #
-    #    my $seq = $self->{session}{seq};
-    #    $seq += 1 unless $is_service;
-    #    my $msg = MTProto::Message->new( $seq, $obj );
-    #    $self->{session}{seq} += 2 unless $is_service;
-    #    $self->send($msg);
-    #    $self->{_pending}{$msg->{msg_id}} = $msg unless $noack;
-    #    AE::log debug => "invoked $msg->{msg_id} (seq now is $self->{session}{seq})";
-    #    return $msg->{msg_id};
 }
 
 1;

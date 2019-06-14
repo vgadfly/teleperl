@@ -61,7 +61,7 @@ sub new
     my @args = qw( on_update on_error on_raw_msg after_invoke noupdate debug keepalive reconnect );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
-    $self = $self->SUPER::new( 
+    $self->SUPER::new( 
         init => undef,
         connecting => undef,
         connected => [ sub { $self->_dequeue }, sub { $self->{_lock} = 1 } ],
