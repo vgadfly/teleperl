@@ -31,12 +31,12 @@ sub _stateful
     my $method = $prefix . $self->{_state};
     # can get @ISA and check each package for method defined or just eval
     # XXX: all exceptions are caught here
-    eval { $self->$method(@_) };
-    if ($@) {
-        $self->{_state} = 'fatal';
-        $self->event( fatal => $@ );
-        die;
-    }
+    $self->$method(@_);
+    #    if ($@) {
+    #    $self->{_state} = 'fatal';
+    #    $self->event( fatal => $@ );
+    #    die;
+    #}
 }
 
 sub _state
@@ -45,7 +45,7 @@ sub _state
     return $self->{_state} unless defined $state;
 
     my $current = $self->{_state};
-    if ( exists $self->{_states}{$current}[ON_LEAVE] ) {
+    if ( defined $current and exists $self->{_states}{$current}[ON_LEAVE] ) {
         $self->{_states}{$current}[ON_LEAVE]->();
     }
 

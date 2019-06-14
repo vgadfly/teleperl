@@ -127,11 +127,13 @@ sub _mt
     my( $self, $aeh ) = @_;
 
     my $mt = MTProto->new( socket => $aeh, session => $self->{session}{mtproto},
-            on_error => $self->_get_err_cb, on_message => $self->_get_msg_cb,
             debug => $self->{debug}
     );
     $mt->reg_cb( state => sub { shift; AE::log debug => "MTP state @_" } );
     $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
+    $mt->reg_cb( message => sub { shift; $self->_msg_cb(@_) } );
+    $mt->reg_cb( socket_error => sub { shift; $self->_socker_err_cb(@_) } );
+
     $mt->start_session;
     $self->{_mt} = $mt;
     $self->_state('connected');
@@ -302,34 +304,27 @@ sub _handle_rpc_error
     return $defer;
 }
 
-sub _get_err_cb
+sub _socket_err_cb
 {
-    my $self = shift;
-    return sub {
-            my %err = @_;
-            AE::log warn => "Error: $err{message}" if ($err{message});
-            AE::log warn => "Error: $err{code}" if ($err{code});
+    my ($self, $err) = shift;
+    AE::log warn => "Socket error: $err";
 
-            if ($self->{reconnect}) {
-                print "reconnecting" if $self->{debug};
-                undef $self->{_mt};
-                $self->start;
-            }
-            else {
-                my $e = {
-                    error_message => $err{message},
-                    error_code => $err{code}
-                };
-                $self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
-                $self->_state('idle');
-            }
+    if ($self->{reconnect}) {
+        undef $self->{_mt};
+        $self->start;
+    }
+    else {
+        my $e = { error_message => $err };
+        $self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
+        $self->_state('idle');
     }
 }
 
-sub _get_msg_cb
+sub _msg_cb
 {
     my $self = shift;
-    return sub {
+    say ref $self;
+    {
         my $msg = shift;
         AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
         AE::log trace => Dumper $msg->{object} if $self->{debug};
