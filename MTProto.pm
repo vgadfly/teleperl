@@ -171,7 +171,7 @@ sub new
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
-    $self = $self->SUPER::new( 
+    $self->SUPER::new( 
         init => undef, 
         phase_one => undef,
         phase_two => undef,
@@ -191,7 +191,7 @@ sub new
     $aeh->on_error( $self->_get_error_cb );
     $aeh->on_drain( $self->_get_write_cb );
     $self->{_aeh} = $aeh;
-    
+   
     return $self;
 }
 
@@ -222,14 +222,11 @@ sub _get_error_cb
 {
     my $self = shift;
     return sub {
-        say "Socket IO error" if $self->{debug};
         my ($hdl, $fatal, $msg) = @_;
-        if ($self->{on_error}) {
-            &{$self->{on_error}}( message => $msg );
-        }
+        $self->emit( socket_error => $msg );
         $self->{last_error} = {message => $msg};
-        # ignore $fatal, destroy anyway
         $hdl->destroy;
+        $self->_state('fatal');
     }
 }
 
@@ -458,7 +455,6 @@ sub _phase_three
     $self->{session}{auth_key_aux} = $auth_key_aux_hash;
     
     # ecrypted connection established
-    $self->{_plain} = 0;
     delete $self->{_pq};
     $self->_state('session_ok');
     # process message queue
@@ -533,7 +529,6 @@ sub send
 
     #AE::log info => "sending ".ref($_)." \n" for @msg;
     
-    # XXX: just use lock in new
     # check if session is ready
     unless ($self->{_state} eq 'session_ok') {
         AE::log debug => "session not ready, queueing\n" if $self->{debug};
@@ -549,7 +544,6 @@ sub send
     }
 }
 
-# XXX: msg_id may be stale
 sub _real_send
 {
     my ($self, $msg) = @_;
@@ -586,29 +580,14 @@ sub _real_send
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
 }
 
-## recv unencrypted message
-sub _recv_plain
-{
-    my ($self, $data) = @_;
-
-    #$$authkey = substr($data, 0, 8);
-    #$$msgid = substr($data, 8, 8);
-    my $len = unpack "L<", substr($data, 16, 4);
-    &{$self->{_handle_plain}}( substr($data, 20, $len) );
-}
-
 ## low level error reporting
 sub _handle_error
 {
     my ($self, $err) = @_;
     my $error = unpack( "l<", $err );
-    if ($self->{on_error}) {
-        &{$self->{on_error}}( code => $error );
-    }
-    else {
-        AE::log warn => "tcp transport error: $error";
-    }
+    $self->emit( mt_error => $error );
     $self->{last_error} = { code => $error };
+    $self->_state('fatal');
 }
 
 sub _handle_msg

@@ -2,11 +2,8 @@ use Modern::Perl;
 
 package Class::Stateful;
 
-use Object::Event;
-#use AnyEvent;
-
+use base 'Class::Event';
 use fields qw( _state _states _fatal );
-use base 'Object::Event';
 
 use constant {
     ON_ENTER => 0,
@@ -15,11 +12,11 @@ use constant {
 
 sub new
 {
-    my $class = shift;
-    
-    #my $self = fields::new( ref $class || $class );
-    my $self = bless ( {}, ref $class || $class );
-    $self = $self->SUPER::new;
+    my $self = shift;
+    unless (ref $self) {
+        $self = fields::new($self);
+    }
+    $self->SUPER::new;
     $self->{_states} = { @_ };
     $self->{_states}{fatal} = undef;
 
