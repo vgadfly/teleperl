@@ -323,29 +323,26 @@ sub _socket_err_cb
 sub _msg_cb
 {
     my $self = shift;
-    say ref $self;
-    {
-        my $msg = shift;
-        AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
-        AE::log trace => Dumper $msg->{object} if $self->{debug};
-        &{$self->{on_raw_msg}}( $msg->{object} ) if $self->{on_raw_msg};
+    my $msg = shift;
+    AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
+    AE::log trace => Dumper $msg->{object} if $self->{debug};
+    &{$self->{on_raw_msg}}( $msg->{object} ) if $self->{on_raw_msg};
 
-        # RpcResults
-        $self->_handle_rpc_result( $msg->{object} )
-            if ( $msg->{object}->isa('MTProto::RpcResult') );
+    # RpcResults
+    $self->_handle_rpc_result( $msg->{object} )
+        if ( $msg->{object}->isa('MTProto::RpcResult') );
 
-        # RpcErrors
-        $self->_handle_rpc_error( $msg->{object} )
-            if ( $msg->{object}->isa('MTProto::RpcError') );
+    # RpcErrors
+    $self->_handle_rpc_error( $msg->{object} )
+        if ( $msg->{object}->isa('MTProto::RpcError') );
 
-        # Updates
-        $self->{_upd}->handle_updates( $msg->{object} )
-            if ( $msg->{object}->isa('Telegram::UpdatesABC') );
+    # Updates
+    $self->{_upd}->handle_updates( $msg->{object} )
+        if ( $msg->{object}->isa('Telegram::UpdatesABC') );
 
-        # New session created, some updates can be missing
-        if ( $msg->{object}->isa('MTProto::NewSessionCreated') ) {
+    # New session created, some updates can be missing
+    if ( $msg->{object}->isa('MTProto::NewSessionCreated') ) {
 
-        }
     }
 }
 
