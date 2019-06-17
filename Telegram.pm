@@ -132,7 +132,7 @@ sub _mt
     $mt->reg_cb( state => sub { shift; AE::log debug => "MTP state @_" } );
     $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
     $mt->reg_cb( message => sub { shift; $self->_msg_cb(@_) } );
-    $mt->reg_cb( socket_error => sub { shift; $self->_socker_err_cb(@_) } );
+    $mt->reg_cb( socket_error => sub { shift; $self->_socket_err_cb(@_) } );
 
     $mt->start_session;
     $self->{_mt} = $mt;

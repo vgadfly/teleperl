@@ -82,7 +82,7 @@ $home->invoke(
                         Telegram::Upload::GetFile->new(
                             location => $fl,
                             offset => 0,
-                            limit => 4096
+                            limit => 512 * 1024
                         ),
                         sub {
                             say Dumper @_;
@@ -103,6 +103,7 @@ $home->invoke(
                 session => {},
                 reconnect => 1,
                 keepalive => 1,
+                noupdate => 1
             );
             $roam->start;
             
@@ -123,11 +124,14 @@ $home->invoke(
                         Telegram::Upload::GetFile->new(
                             location => $fl,
                             offset => 0,
-                            limit => 4096
+                            limit => 512 * 1024
                         ),
                         sub {
                             say Dumper @_;
-                            #$cv->send;
+                            open my $file, ">download.bin";
+                            print $file $_[0]->{bytes};
+                            close $file;
+                            $cv->send;
                         }
                     );
                 }
