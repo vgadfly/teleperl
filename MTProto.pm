@@ -250,7 +250,6 @@ sub start_session
 
     AE::log debug => "starting new session\n" if $self->{debug};
 
-    $self->{_plain} = 1;
     $self->{session}{seq} = 0;
 
 #
@@ -682,6 +681,7 @@ sub _handle_msg
             }
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {
+            #AE::log trace => Dumper $m->{object};
             my $id = $m->{object}{req_msg_id};
             $self->{_pending}{$id}[1]->($id) if defined $self->{_pending}{$id}[1];
             delete $self->{_pending}{$id};

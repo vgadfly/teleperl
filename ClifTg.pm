@@ -149,6 +149,7 @@ sub command_map
     set         => 'CliTg::Command::Set',
     updates     => 'CliTg::Command::Updates',
     users       => 'CliTg::Command::Users',
+    config      => 'CliTg::Command::Config',
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
@@ -644,7 +645,7 @@ sub handle_history
         $opts->{limit}-- if $opts->{limit};
         if ($upd->isa('Telegram::Message')) {
             $self->get_app->render_msg($upd);
-            #say Dumper $upd;
+            say Dumper $upd;
         }
     }
     if ($ptop == 0 or $top < $ptop && $opts->{limit}) {
@@ -1164,6 +1165,21 @@ sub run {
     my $argo = $self->cache->get('_argobjarr');
     local $Data::Dumper::Indent = 1;
     return Dumper(shift @$argo);
+}
+
+package CliTg::Command::Config;
+use base "CLI::Framework::Command::Meta";
+
+use Telegram::Help::GetConfig;
+use Data::Dumper;
+
+sub run
+{
+    my $self = shift;
+
+    my $tg = $self->cache->get('tg');
+
+    $tg->invoke( Telegram::Help::GetConfig->new, sub { $self->get_app->render(Dumper @_) } );
 }
 
 1;
