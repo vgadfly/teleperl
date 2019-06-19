@@ -15,7 +15,14 @@ use Crypt::OpenSSL::Random;
 
 use Data::Dumper;
 
-my ($dc, $vol, $id, $secret) = @ARGV;
+my ($type, $dc, $vol, $id, $secret) = @ARGV;
+my $filename = $type eq 'f' ? "$dc-$vol-$id" : "$dc-$vol";
+
+if ($type eq 'd') {
+    $secret = $id;
+    $id = $vol;
+}
+my $partsize = 2 ** 19;
 
 my $old = retrieve('session.dat');
 my $config = Config::Tiny->read('teleperl.conf');
@@ -27,6 +34,7 @@ my $home = Telegram->new(
     session => $old,
     reconnect => 1,
     keepalive => 1,
+    noupdate => 1
 );
 
 my $dc_pool = {};
@@ -51,44 +59,69 @@ $home->invoke(
 
 $cv->recv;
 $cv = AE::cv;
+open my $file, ">$filename";
+binmode $file;
+
+sub load_part
+{
+    my ($roam, $part, $cb) = @_;
+    
+    my $loc = ($type eq "f") ? 
+        Telegram::InputFileLocation->new(
+            volume_id => $vol,
+            local_id => $id,
+            secret => $secret
+        )
+        :
+        Telegram::InputDocumentFileLocation->new(
+            id => $id,
+            access_hash => $secret,
+            version => 0 # XXX
+        );
+    say Dumper $loc;
+    $roam->invoke(
+        Telegram::Upload::GetFile->new(
+            location => $loc,
+            offset => $part * $partsize,
+            limit => $partsize
+        ),
+        sub {
+            if ($_[0]->isa('MTProto::RpcError')) {
+                die Dumper @_;
+            }
+            print $file $_[0]->{bytes};
+            if (length($_[0]->{bytes}) == $partsize) {
+                return load_part( $roam, $part+1, $cb );
+            }
+            else {
+                return $cb->();
+            }
+        }
+    );
+}
 
 $home->invoke(
     Telegram::Auth::ExportAuthorization->new( dc_id => $dc ),
     sub {
         my $eauth = $_[0];
         say Dumper $eauth;
+        my $roam;
         if ($eauth->isa('MTProto::RpcError')) {
             my $new = dclone $old;
             # XXX
             $new->{mtproto}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
             $new->{mtproto}{seq} = 0;
-            my $roam = Telegram->new(
+            $roam = Telegram->new(
                 dc => $config->{dc},
                 app => $config->{app},
                 proxy => $config->{proxy},
                 session => $new,
                 reconnect => 1,
                 keepalive => 1,
+                noupdate => 1
             );
             $roam->start;
-            
-                    my $fl = Telegram::InputFileLocation->new(
-                        volume_id => $vol,
-                        local_id => $id,
-                        secret => $secret
-                    );
-
-                    $roam->invoke(
-                        Telegram::Upload::GetFile->new(
-                            location => $fl,
-                            offset => 0,
-                            limit => 512 * 1024
-                        ),
-                        sub {
-                            say Dumper @_;
-                            #$cv->send;
-                        }
-                    );
+            load_part($roam, 0, sub { $cv->send });
         }
         if ($eauth->isa('Telegram::Auth::ExportedAuthorization')) {
             my $dca = { 
@@ -96,7 +129,7 @@ $home->invoke(
                 port => $dc_pool->{$dc}{static}[0]{port},
             };
             say "DC $dc: $dca->{addr}:$dca->{port}";
-            my $roam = Telegram->new(
+            $roam = Telegram->new(
                 dc => $dca,
                 app => $config->{app},
                 proxy => $config->{proxy},
@@ -106,34 +139,13 @@ $home->invoke(
                 noupdate => 1
             );
             $roam->start;
-            
             $roam->invoke(
-                Telegram::Auth::ImportAuthorization->new( 
+                Telegram::Auth::ImportAuthorization->new(
                     id => $eauth->{id},
                     bytes => $eauth->{bytes}
                 ),
                 sub {
-                    say Dumper @_;
-                    my $fl = Telegram::InputFileLocation->new(
-                        volume_id => $vol,
-                        local_id => $id,
-                        secret => $secret
-                    );
-
-                    $roam->invoke(
-                        Telegram::Upload::GetFile->new(
-                            location => $fl,
-                            offset => 0,
-                            limit => 512 * 1024
-                        ),
-                        sub {
-                            say Dumper @_;
-                            open my $file, ">download.bin";
-                            print $file $_[0]->{bytes};
-                            close $file;
-                            $cv->send;
-                        }
-                    );
+                    load_part($roam, 0, sub { $cv->send });
                 }
             );
         }
