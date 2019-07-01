@@ -79,7 +79,7 @@ $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path
 }
 
 my $pid = &check_exit();
-die "flag exists on start with $pid contents\n" if $pid;
+AE::log fatal => "flag exists on start with $pid contents\n" if $pid;
 
 # catch all non-our Perl's warns to log with stack trace
 # we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
@@ -103,7 +103,8 @@ my $tg = Telegram->new(
     reconnect => 1,
     keepalive => 1,
     noupdate => $opts->{noupdate},
-    debug => $opts->{debug}
+    debug => $opts->{debug},
+    minutonline => 0,
 );
 $tg->{on_raw_msg} = \&one_message;
 $tg->{after_invoke} = \&after_invoke;
@@ -233,7 +234,9 @@ sub check_exit {
         open FLG, "<$flag";
         <FLG>
     };
-    unlink $flag;
+    close FLG if $cbor_data;
+    unlink $flag
+        or AE::log error => "unlink: $!";
 
     return ($body || 'empty');
 }
@@ -275,6 +278,7 @@ if ($^O ne 'MSWin32') {
     );
 }
 
+AE::log note => "entering main loop";
 $cond->recv;
 save_cbor() if @clones;
 
