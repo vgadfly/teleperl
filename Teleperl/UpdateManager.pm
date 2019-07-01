@@ -1,6 +1,6 @@
 use Modern::Perl;
 
-package TeleUpd;
+package Teleperl::UpdateManager;
 
 ## This package handles updates
 
@@ -25,9 +25,8 @@ package TeleUpd;
 ##  GetDifference and GetChannelDifference are used to request missing updates.
 ##
 
-use fields qw( session _tg _q _lock );
+use fields qw( session _q _lock );
 
-use Scalar::Util qw/weaken/;
 use AnyEvent;
 use Data::Dumper;
 
@@ -40,8 +39,6 @@ sub new
     my ($class, $session, $tg) = @_;
     my $self = fields::new( ref $class || $class );
     
-    weaken $tg;
-    $self->{_tg} = $tg;
     $self->{session} = $session;
     $self->_lock;
 
@@ -55,7 +52,8 @@ sub sync
     $self->_lock;
 
     if (not exists $self->{session} or $force) {
-        $self->{_tg}->invoke( Telegram::Updates::GetState->new, 
+        $self->event( 'query',
+            Telegram::Updates::GetState->new, 
             sub {
                 my $us = shift;
                 if ($us->isa('Telegram::Updates::State')) {
@@ -68,7 +66,7 @@ sub sync
         );
     }
     else {
-        $self->{_tg}->invoke( 
+        $self->event( 'query', 
             Telegram::Updates::GetDifference->new( 
                    date => $self->{session}{date},
                    pts => $self->{session}{pts},
@@ -112,23 +110,25 @@ sub _check_pts
         AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"");
         if (defined $channel) {
             my $channel_peer = $self->{_tg}->peer_from_id( $channel );
-            $self->{_tg}->invoke( Telegram::Updates::GetChannelDifference->new(
-                channel => $channel_peer,
-                filter => Telegram::ChannelMessagesFilterEmpty->new,
-                pts => $local_pts,
-                limit => 0
-            ),
-            sub { $self->_handle_channel_diff( $channel, @_ ) }
+            $self->event( 'query',
+                Telegram::Updates::GetChannelDifference->new(
+                    channel => $channel_peer,
+                    filter => Telegram::ChannelMessagesFilterEmpty->new,
+                    pts => $local_pts,
+                    limit => 0
+                ),
+                sub { $self->_handle_channel_diff( $channel, @_ ) }
             ) if defined $channel_peer;
         }
         else {
-            $self->{_tg}->invoke( Telegram::Updates::GetDifference->new( 
-                date => $self->{session}{date},
-                pts => $local_pts,
-                qts => -1,
-            ), 
-            sub {$self->_handle_upd_diff(@_) }
-        );
+            $self->event( 'query',
+                Telegram::Updates::GetDifference->new( 
+                    date => $self->{session}{date},
+                    pts => $local_pts,
+                    qts => -1,
+                ), 
+                sub { $self->_handle_upd_diff(@_) }
+            );
         }
         return 0;
     }
@@ -175,7 +175,7 @@ sub _handle_update
         my $local_pts = $self->{session}{channel_pts}{$upd->{channel_id}};
         AE::log warn => "rcvd ChannelTooLong for $upd->{channel_id} but no local pts thus no updates"
             unless defined $local_pts;
-        $self->{_tg}->invoke(
+        $self->event( 'query',
             Telegram::Updates::GetChannelDifference->new(
                 channel => $channel,
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
@@ -213,25 +213,17 @@ sub _handle_update
     }
 
     if ($pts_good) {    
-        if ( 
-            $upd->isa('Telegram::UpdateNewChannelMessage') or
-            $upd->isa('Telegram::UpdateNewMessage')
-        ) {
-            $self->{_tg}{on_update}->($upd->{message}) if $self->{_tg}{on_update};
-        }
+        $self->event( update => $upd );
     }
-        # TODO: separate messages from other updates
-    #if ( $upd->isa('Telegram::UpdateChatUserTyping') ) {
-    #    &{$self->{on_update}}($upd) if $self->{on_update};
-    #}
 }
 
 sub _handle_short_update
 {
     my ($self, $upd) = @_;
 
-    my $in_msg = $self->message_from_update( $upd );
-    $self->{_tg}{on_update}->( $in_msg ) if $self->{_tg}{on_update};
+    $self->event( update => $upd );
+    #my $in_msg = $self->message_from_update( $upd );
+    #$self->{_tg}{on_update}->( $in_msg ) if $self->{_tg}{on_update};
 }
 
 ## store seq and date
@@ -291,15 +283,15 @@ sub _handle_upd_diff
     $self->{session}{date} = $upd_state->{date};
     $self->{session}{pts} = $upd_state->{pts};
     
-    $self->{_tg}->_cache_users(@{$diff->{users}});
-    $self->{_tg}->_cache_chats(@{$diff->{chats}});
+    $self->event( 'cache', users => $diff->{users} );
+    $self->event( 'cache', chats => $diff->{chats} );
     
     for my $upd (@{$diff->{other_updates}}) {
         $self->_handle_update( $upd );
     }
     for my $msg (@{$diff->{new_messages}}) {
         #say ref $msg;
-        $self->{_tg}{on_update}->($msg) if $self->{_tg}{on_update};
+        $self->event( update => $msg );
     }
 
     $self->_unlock if $unlock;
@@ -322,39 +314,33 @@ sub _handle_channel_diff
     #say ref $diff;
   
     if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
-        AE::log warn => "ChannelDifferenceTooLong";
-        $self->{_tg}->_cache_users(@{$diff->{users}});
-        $self->{_tg}->_cache_chats(@{$diff->{chats}});
+        AE::log debug => "ChannelDifferenceTooLong";
+        
+        $self->event( 'cache', users => $diff->{users} );
+        $self->event( 'cache', chats => $diff->{chats} );
+        
         $self->{session}{channel_pts}{$channel} = $diff->{pts};  
         AE::log info => "old pts=",$self->{session}{channel_pts}{$channel};
         AE::log info => "new pts=$diff->{pts}";
+        
         for my $msg (@{$diff->{messages}}) {
-           #say ref $msg;
-           $self->{_tg}{on_update}->($msg) if $self->{_tg}{on_update};
+            $self->event( update => $msg );
         }
 
-        #$self->{_tg}->invoke( Telegram::Updates::GetChannelDifference->new(
-        #    channel => $channel_peer,
-        #    filter => Telegram::ChannelMessagesFilterEmpty->new,
-        #    pts => $local_pts,
-        #    limit => 0
-        #),
-        #sub { $self->_handle_channel_diff( $channel, @_ ) }
-        #) if defined $channel_peer;
         return;
     }
+
     AE::log debug => "channel=$channel, new pts=$diff->{pts}" ;
     $self->{session}{channel_pts}{$channel} = $diff->{pts};  
 
-    $self->{_tg}->_cache_users(@{$diff->{users}});
-    $self->{_tg}->_cache_chats(@{$diff->{chats}});
+    $self->event( 'cache', users => $diff->{users} );
+    $self->event( 'cache', chats => $diff->{chats} );
     
     for my $upd (@{$diff->{other_updates}}) {
         $self->_handle_update( $upd );
     }
     for my $msg (@{$diff->{new_messages}}) {
-        #say ref $msg;
-        $self->{_tg}{on_update}->($msg) if $self->{_tg}{on_update};
+        $self->event( update => $msg );
     }
 }
 
@@ -389,10 +375,14 @@ sub _do_handle_updates
     }
 
     # XXX: UpdatesCombined
+    if ( $updates->isa('Telegram::UpdatesCombined') ) {
+        $self->_fatal('UpdatesCombined');
+        return;
+    }
     # regular updates
     if ( $updates->isa('Telegram::Updates') ) {
-        $self->{_tg}->_cache_users( @{$updates->{users}} );
-        $self->{_tg}->_cache_chats( @{$updates->{chats}} );
+        $self->event('cache', users => $updates->{users});
+        $self->event('cache', chats => $updates->{chats});
         $self->_store_seq_date( $updates->{seq}, $updates->{date} );
         
         for my $upd ( @{$updates->{updates}} ) {
@@ -407,7 +397,8 @@ sub _do_handle_updates
     }
     
     if ( $updates->isa('Telegram::UpdatesTooLong') ) {
-        $self->{_tg}->invoke( Telegram::Updates::GetDifference->new( 
+        $self->event( 'query',
+            Telegram::Updates::GetDifference->new( 
                 date => $self->{session}{date},
                 pts => $self->{session}{pts},
                 qts => -1,
@@ -415,29 +406,6 @@ sub _do_handle_updates
             sub { $self->_handle_upd_diff(@_) } 
         );
     }
-}
-
-# XXX: exists only for unification, handle short updates elsewhere
-sub message_from_update
-{
-    my ($self, $upd) = @_;
-    
-    local $_;
-    my %arg;
-
-    for ( qw( out mentioned media_unread silent id fwd_from via_bot_id 
-        reply_to_msg_id date message entities ) ) 
-    {
-        $arg{$_} = $upd->{$_} if exists $upd->{$_};
-    }
-    # some updates have user_id, some from_id
-    $arg{from_id} = $upd->{user_id} if (exists $upd->{user_id});
-    $arg{from_id} = $upd->{from_id} if (exists $upd->{from_id});
-
-    # chat_id
-    $arg{to_id} = $upd->{chat_id} if (exists $upd->{chat_id});
-
-    return Telegram::Message->new( %arg );
 }
 
 1;
