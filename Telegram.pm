@@ -4,7 +4,7 @@ package Telegram;
 
   Telegram API client
 
-  Handles connects, sessions, updates, files, entity cache
+  Valid states: init, connecting, connected, idle, fatal
 
 =cut
 
@@ -32,11 +32,6 @@ use TeleUpd;
 use Telegram::InvokeWithLayer;
 use Telegram::InitConnection;
 
-# Auth
-use Telegram::Auth::SendCode;
-use Telegram::Auth::SentCode;
-use Telegram::Auth::SignIn;
-
 use Telegram::ChannelMessagesFilter;
 use Telegram::Account::UpdateStatus;
 
@@ -50,15 +45,14 @@ use Telegram::InputPeer;
 
 use base 'Class::Stateful';
 use fields qw(
-    _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
+    _mt _dc _app _proxy _timer _first _req _lock _flood_timer
     _queue _upd reconnect session debug keepalive noupdate error
-    on_update on_error on_raw_msg after_invoke
 );
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( on_update on_error on_raw_msg after_invoke noupdate debug keepalive reconnect );
+    my @args = qw( noupdate keepalive reconnect debug ); # dc, proxy, app, session
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     $self->SUPER::new( 
@@ -72,7 +66,6 @@ sub new
     $self->{_dc} = $arg{dc};
     $self->{_proxy} = $arg{proxy};
     $self->{_app} = $arg{app};
-    $self->{_code_cb} = $arg{on_auth};
 
     @$self{@args} = @arg{@args};
 
@@ -82,8 +75,6 @@ sub new
     $self->{session} = $session;
     $self->{_first} = 1;
     $self->{_lock} = 1;
-
-    $self->{_upd} = TeleUpd->new($session->{update_state}, $self);
 
     return $self;
 }
@@ -138,15 +129,7 @@ sub _mt
     $self->{_mt} = $mt;
     $self->_state('connected');
 
-    $self->run_updates unless $self->{noupdate};
     $self->_dequeue; # unlock
-}
-
-sub run_updates {
-    my $self = shift;
-
-    $self->{_timer} = AnyEvent->timer( after => 45, interval => 45, cb => $self->_get_timer_cb );
-    $self->{_upd}->sync; 
 }
 
 sub _real_invoke
@@ -214,45 +197,6 @@ sub _dequeue
     $self->{_lock} = 0;
 }
 
-sub auth
-{
-    my ($self, %arg) = @_;
-
-    unless ($arg{code}) {
-        $self->{session}{phone} = $arg{phone};
-        $self->invoke(
-            Telegram::Auth::SendCode->new( 
-                phone_number => $arg{phone},
-                api_id => $self->{_app}{api_id},
-                api_hash => $self->{_app}{api_hash},
-                flags => 0
-        ));
-    }
-    else {
-        $self->invoke(
-            Telegram::Auth::SignIn->new(
-                phone_number => $self->{session}{phone},
-                phone_code_hash => $self->{_code_hash},
-                phone_code => $arg{code}
-        ));
-    }
-}
-
-sub update
-{
-    my $self = shift;
-
-    $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
-    $self->invoke( Telegram::Updates::GetState->new, sub {
-            my $us = shift;
-            if ($us->isa('Telegram::Updates::State')) {
-                $self->{session}{update_state}{seq} = $us->{seq};
-                $self->{session}{update_state}{pts} = $us->{pts};
-                $self->{session}{update_state}{date} = $us->{date};
-            }
-        } );
-}
-
 sub _handle_rpc_result
 {
     my ($self, $res) = @_;
@@ -280,9 +224,13 @@ sub _handle_rpc_error
     AE::log warn => "RPC error %s on req %d", $err->{error_message}, $req_id;
     if ($err->{error_message} eq 'USER_DEACTIVATED') {
         $self->{_timer} = undef;
+        $self->event("banned");
+        $self->_state('idle');
     }
     if ($err->{error_message} eq 'AUTH_KEY_UNREGISTERED') {
         $self->{_timer} = undef;
+        $self->event('auth');
+        $self->_state('idle');
     }
     if ($err->{error_message} =~ /^FLOOD_WAIT_/) {
         my $to = $err->{error_message};
@@ -344,62 +292,6 @@ sub _msg_cb
     if ( $msg->{object}->isa('MTProto::NewSessionCreated') ) {
 
     }
-}
-
-sub get_messages
-{
-    local $_;
-    my $self = shift;
-    my @input;
-    for (@_) {
-        push @input, Telegram::InputMessageID->new( id => $_ );
-    }
-    $self->invoke( Telegram::Messages::GetMessages->new( id => [@input] ) );
-}
-
-sub send_text_message
-{
-    my ($self, %arg) = @_;
-
-    my $msg = Telegram::Messages::SendMessage->new(
-        map {
-            $arg{$_} ? ( $_ => $arg{$_} ) : ()
-        } qw(no_webpage silent background clear_draft reply_to_msg_id entities)
-    );
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
-
-    $msg->{message} = $arg{message};    # TODO check utf8
-    $msg->{random_id} = int(rand(65536));
-
-    my $peer;
-    if (exists $users->{$arg{to}}) {
-        $peer = Telegram::InputPeerUser->new( 
-            user_id => $arg{to}, 
-            access_hash => $users->{$arg{to}}{access_hash}
-        );
-    }
-    if (exists $chats->{$arg{to}}) {
-        $peer = Telegram::InputPeerChannel->new( 
-            channel_id => $arg{to}, 
-            access_hash => $chats->{$arg{to}}{access_hash}
-        ) if defined $chats->{$arg{to}}{access_hash};
-    }
-
-    if ($arg{to}->isa('Telegram::PeerChannel')) {
-        $peer = Telegram::InputPeerChannel->new( 
-            channel_id => $arg{to}->{channel_id}, 
-            access_hash => $chats->{$arg{to}->{channel_id}}{access_hash}
-        );
-    }
-    unless (defined $peer) {
-        $peer = Telegram::InputPeerChat->new( chat_id => $arg{to} );
-    }
-
-    $msg->{peer} = $peer;
-
-    AE::log trace => Dumper $msg if defined $self->{debug};
-    $self->invoke( $msg ) if defined $peer;
 }
 
 sub _get_timer_cb
