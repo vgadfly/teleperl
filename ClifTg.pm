@@ -645,10 +645,10 @@ sub handle_history
         $opts->{limit}-- if $opts->{limit};
         if ($upd->isa('Telegram::Message')) {
             $self->get_app->render_msg($upd);
-            say Dumper $upd;
         }
     }
-    if ($ptop == 0 or $top < $ptop && $opts->{limit}) {
+    return unless $top;    # if bottom reached, slice will be empty
+    if ($ptop == 0 or $top < $ptop && ($opts->{limit} // "true")) {
         $tg->invoke( Telegram::Messages::GetHistory->new(
                 peer => $peer,
                 offset_id => $top,
