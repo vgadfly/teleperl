@@ -579,9 +579,9 @@ sub _real_send
 
     my $packet = $self->{session}{auth_key_id} . $msg_key . $enc_data;
 
-    if ($self->{debug}) {
-        AE::log debug => "sending $message->{seq}:$message->{msg_id}, ".length($packet). " bytes encrypted\n";
-    }
+    AE::log debug => "sending $message->{seq}:$message->{msg_id} ".
+        "(".ref($message->{object})."), ".
+        length($packet). " bytes encrypted\n";
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
 }
 
@@ -597,11 +597,9 @@ sub _handle_error
 
 sub _handle_msg
 {
-    my ($self, $msg) = @_;
+    my ($self, $msg, $in_container) = @_;
 
-    if ($self->{debug}) {
-        AE::log debug => "handle_msg $msg->{seq},$msg->{msg_id}: " . ref $msg->{object};
-    }
+    AE::log debug => "handle_msg $msg->{seq},$msg->{msg_id}: " . ref $msg->{object};
 
     # unpack msg containers
     my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
@@ -612,16 +610,18 @@ sub _handle_msg
         my $msg_count = unpack( "L<", substr($data, 4, 4) );
         my $pos = 8;
         
-        AE::log debug => "msg container of size $msg_count\n" if $self->{debug};
+        AE::log debug => "msg container of size $msg_count\n";
         while ( $msg_count && $pos < length($data) ) {
             my $sub_len = unpack( "L<", substr($data, $pos+12, 4) );
             my $sub_msg = MTProto::Message->unpack( substr($data, $pos) );
-            $self->_handle_msg( $sub_msg );
+            $self->_handle_msg( $sub_msg, 1 );
             #print "  ", unpack( "H*", $sub_msg ), "\n";
             $pos += 16 + $sub_len;
             $msg_count--;
         }
         AE::log warn => "msg container ended prematuraly" if $msg_count;
+        # ack the container
+        $self->_ack($msg->{msg_id});
     }
     # gzip
     elsif ($objid == 0x3072cfa1) {
@@ -639,7 +639,7 @@ sub _handle_msg
         #print ref $ret if defined $ret;
         $msg->{data} = $objdata;
         $msg->{object} = $ret;
-        $self->_handle_msg( $msg ) if defined $ret;
+        $self->_handle_msg( $msg, $in_container ) if defined $ret;
     }
     else {
     # service msg handlers
@@ -668,10 +668,13 @@ sub _handle_msg
                 # 33: msg_seqno too high
                 #
                 # start new session
-                $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
-                $self->{session}{seq} = 0;
-                # XXX: send with new seq_no!
-                $self->resend($m->{object}{bad_msg_id});
+                # XXX: don't start new session for service messages, i.e. acks
+                if (exists $self->{_pending}{$bad_msg}){
+                    $self->{session}{session_id} = 
+                        Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+                    $self->{session}{seq} = 0;
+                    $self->resend($bad_msg);
+                }
             }
             else {
                 # other errors, that cannot be fixed in runtime
@@ -686,12 +689,13 @@ sub _handle_msg
             $self->{_pending}{$id}[1]->($id) if defined $self->{_pending}{$id}[1];
             delete $self->{_pending}{$id};
         }
-        if (($m->{seq} & 1) and not $self->{noack}) {
+        if (($m->{seq} & 1) and not $self->{noack} and not $in_container) {
             # ack content-related messages
             $self->_ack($m->{msg_id});
         }
 
         # pass msg to handler
+        # XXX: don't pass transport errors
         $self->event( message => $m );
     }
 

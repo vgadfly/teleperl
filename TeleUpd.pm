@@ -84,7 +84,7 @@ sub sync
 sub _lock
 {
     my $self = shift;
-    AE::log warn => "locking updates queue";
+    AE::log info => "locking updates queue";
     $self->{_lock} = 1;
 }
 
@@ -93,7 +93,7 @@ sub _unlock
     my $self = shift;
     local $_;
 
-    AE::log warn => "unlocking updates queue";
+    AE::log info => "unlocking updates queue";
     # process queue
     $self->_do_handle_updates($_) while ($_ = shift @{$self->{_q}});
     
@@ -147,7 +147,7 @@ sub _debug_print_update
 {
     my ($self, $upd) = @_;
 
-    AE::log warn => __LINE__ . " " . ref $upd;
+    AE::log debug => ref $upd;
     
     if ($upd->isa('Telegram::Update::UpdateNewChannelMessage')) {
         my $ch_id = $upd->{message}{to_id}{channel_id};
@@ -158,7 +158,7 @@ sub _debug_print_update
         AE::log debug => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{pts}"
             if (exists $upd->{pts});
     }
-    AE::log warn => "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
+    AE::log debug => "seq=$upd->{seq}" if (exists $upd->{seq} and $upd->{seq} > 0);
 
 }
 

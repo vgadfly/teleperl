@@ -51,14 +51,14 @@ use Telegram::InputPeer;
 use base 'Class::Stateful';
 use fields qw(
     _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
-    _queue _upd reconnect session debug keepalive noupdate error
+    _queue _upd reconnect session debug keepalive noupdate minutonline error
     on_update on_error on_raw_msg after_invoke
 );
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( on_update on_error on_raw_msg after_invoke noupdate debug keepalive reconnect );
+    my @args = qw( on_update on_error on_raw_msg after_invoke noupdate minutonline debug keepalive reconnect );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     $self->SUPER::new( 
@@ -133,6 +133,7 @@ sub _mt
     $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
     $mt->reg_cb( message => sub { shift; $self->_msg_cb(@_) } );
     $mt->reg_cb( socket_error => sub { shift; $self->_socket_err_cb(@_) } );
+    $mt->reg_cb( mt_error => sub { shift; AE::log warn => "tcp transport error: @_" } );
 
     $mt->start_session;
     $self->{_mt} = $mt;
@@ -581,7 +582,8 @@ sub _get_timer_cb
     my $self = shift;
     return sub {
         AE::log debug => "timer tick" if $self->{debug};
-        $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
+        $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) )
+            if not defined $self->{minutonline} or $self->{minutonline} and int(AE::now / 60) % $self->{minutonline} == 0;
         $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) if $self->{keepalive};
     }
 }
