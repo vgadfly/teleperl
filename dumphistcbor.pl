@@ -22,13 +22,18 @@ use Telegram;
 use Telegram::Messages::GetDialogs;
 use Telegram::InputPeer;
 use Telegram::Messages::GetHistory;
+use Telegram::Users::GetFullUser;
+use Telegram::Messages::GetFullChat;
+use Telegram::Channels::GetFullChannel;
+use Telegram::Channels::GetParticipants;
+use Telegram::ChannelParticipantsFilter;
 
 use Data::Dumper;
 use Scalar::Util qw(reftype);
 
 sub option_spec {
     [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
-    [ 'noupdate!'   => 'pass noupdate to Telegram->new'                     ],
+    [ 'noupdate!'   => 'pass noupdate to Telegram->new', { default => 1 }   ],
     [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log', {default=>0}],
     [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
@@ -92,7 +97,7 @@ die "flag exists on start with $pid contents\n" if $pid;
 # catch all non-our Perl's warns to log with stack trace
 # we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
 $SIG{__WARN__} = sub {
-    scalar( grep /AnyEvent|log/, map { (caller($_))[0..3] } (1..3) )
+    scalar( grep /AnyEvent|\blog/, map { (caller($_))[0..3] } (1..3) )
         ? warn $_[0]
         : AE::log warn => &Carp::longmess;
 };
@@ -256,7 +261,8 @@ $tg->invoke(
         offset_date => 0,
         offset_id => 0,
         offset_peer => Telegram::InputPeerEmpty->new,
-        limit => -1
+        limit => -1,
+        hash => 0,
     ), sub { "noop" }
 );
 
@@ -293,7 +299,7 @@ sub handle_history
                 offset_id => $top,
                 offset_date	=> $opts->{offset_date} // 0,
                 add_offset	=> $opts->{add_offset} // 0,
-                limit	=> $opts->{limit}  || 10,
+                limit	=> $opts->{limit}  || 20,
                 max_id	=> $opts->{max_id} || 0,
                 min_id	=> $opts->{min_id} || 0,
                 hash => 0
@@ -304,23 +310,104 @@ sub handle_history
     }
 }
 
+sub handle_chanparticipants {
+    my ($reply, $offset) = @_;
+
+    one_message($_[0]);
+
+    unless ($reply->isa('Telegram::Channels::ChannelParticipants')) {
+        AE::log warn => "not a Telegram::Channels::ChannelParticipants" . Dumper($reply);
+        return;
+    }
+    AE::log debug => "offset=%d count=%d", $offset, $reply->{count};
+
+    $offset += 20;  # XXX hardcode
+    return if $offset > $reply->{count};
+
+    $tg->invoke(
+        Telegram::Channels::GetParticipants->new(
+            channel => $peer,
+            filter  => Telegram::ChannelParticipantsRecent->new(),
+            offset  => $offset,
+            limit   => 0,
+            hash    => 0,
+
+        ),
+        sub {
+            handle_chanparticipants($_[0], $offset);
+        }
+    );
+}
+
+# save info about peer in addition to history
+sub mainreqs {
+    if ($peer->isa('Telegram::InputPeerUser')) {
+        # users.getFullUser
+        $tg->invoke(
+            Telegram::Users::GetFullUser->new(
+                id  => $peer,
+            ),
+            \&one_message,
+        );
+    }
+    elsif ($peer->isa('Telegram::InputPeerChat')) {
+        # messages.getFullChat
+        $tg->invoke(
+            Telegram::Messages::GetFullChat->new(
+                chat_id => $peer->{chat_id},
+            ),
+            sub {
+                # TODO do request Telegram::UserFull for each?
+                one_message($_[0]);
+            }
+        );
+
+    }
+    elsif ($peer->isa('Telegram::InputPeerChannel')) {
+        # channels.getFullChannel
+        $tg->invoke(
+            Telegram::Channels::GetFullChannel->new(
+                channel => $peer,
+            ),
+            \&one_message,
+        );
+        # channels.getParticipants
+        $tg->invoke(
+            Telegram::Channels::GetParticipants->new(
+                channel => $peer,
+                filter  => Telegram::ChannelParticipantsRecent->new(),
+                offset  => 0,   # XXX ?
+                limit   => 0,
+                hash    => 0,
+
+            ),
+            sub {
+                handle_chanparticipants($_[0], 0);
+            }
+        );
+    }
+
+    # then, history itself
+    $tg->invoke(
+        Telegram::Messages::GetHistory->new(
+            peer => $peer,
+            offset_id	=> $opts->{offset_id} // 0,
+            offset_date	=> $opts->{offset_date} // 0,
+            add_offset	=> $opts->{add_offset} // 0,
+            limit	=> $opts->{limit} // 20,
+            max_id	=> $opts->{max_id} // 0,
+            min_id	=> $opts->{min_id} // 0,
+            hash => 0
+        ), sub {
+            handle_history($peer, $_[0], 0, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
+        }
+    );
+}
+
+# give a time for possible MTProto sync errors...
 my $req = AnyEvent->timer(
     after => 3,
-    cb => sub {
-        $tg->invoke( Telegram::Messages::GetHistory->new(
-                peer => $peer,
-                offset_id	=> $opts->{offset_id} // 0,
-                offset_date	=> $opts->{offset_date} // 0,
-                add_offset	=> $opts->{add_offset} // 0,
-                limit	=> $opts->{limit} // 10,
-                max_id	=> $opts->{max_id} // 0,
-                min_id	=> $opts->{min_id} // 0,
-                hash => 0
-            ), sub {
-                handle_history($peer, $_[0], 0, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
-
-        } );
-    }
+    cb => \&mainreqs,
 );
 
 my $save_i = 1;

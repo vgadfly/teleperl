@@ -54,7 +54,13 @@ $| = 1;
 $Data::DPath::USE_SAFE = 0; # or it will not see our classes O_o
 $filter = dpathr($opts->filter) if $opts->filter;
 
+my $cborlen = length $cbor_data;
+my $tl_len = 0;
+
 sub one_rec {
+    my $obj = exists $_->{in} ? $_->{in} : $_->{out};
+    $obj = $_->{data} unless $obj;
+    $tl_len += 4*scalar($obj->pack);
     say POSIX::strftime("%Y.%m.%d %H:%M:%S ", localtime delete $_[0]->{time})
       . Dumper(defined $filter
           ? $filter->match($_[0])
@@ -68,6 +74,8 @@ while (length $cbor_data) {
     substr($cbor_data, 0, $octets) = '';
     one_rec $_ for (ref $rec eq 'HASH' ? $rec : @$rec);
 }
+
+say "cborlen=$cborlen tl_len=$tl_len";
 
 redo;
 }
