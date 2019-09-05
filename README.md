@@ -1,5 +1,5 @@
 # teleperl
-Pure perl mtproto/telergam client
+Pure perl mtproto/telergam client library
 
 ## DEPENDS
 - Modern::Perl
@@ -43,13 +43,18 @@ Not yet used but discussed:
 
 ## PREPARE
 - generate parser using yapp: `yapp -m TL -s tl.yp`
-- generate MTProto and Telegram TL packages: `perl tl-gen.pl MTProto res/mtproto.tl` and `perl tl-gen.pl Telegram res/layer82-tdesktop.tl`
+- generate MTProto and Telegram TL packages: `perl tl-gen.pl MTProto res/mtproto.tl` and `perl tl-gen.pl Telegram res/<schemelayerNN>.tl` (see notes)
 - edit config file to put your own API id/hash, phone number and possibly proxy
-- if needed, create new session (session.dat for apps) with `auth.pl`: enter to it code sent by SMS or in other session, and then press ^C
+- login: create new session (session.dat for apps) with `auth` command of `cli.pl`: enter to it code sent by SMS or in other session
 
 ## NOTES / WARNS
 Telegram.pm API is very unstable and subject to change greatly :) Other parts, too: note that official Telegram docs are mostly outdated and incomplete even for that parts - so often code is done by trial-and-error, which leads to many bugs. Beware. Here be dragons.
 
 As scheme is not known to lower-level modules (there are both text strings and byte strings), do UTF-8 decode yourself (this may change after adding introspection).
 
-*LEGAL ISSUES*: Publishing API ID/hash in source code prohibited by Telegram License / API Terms of Use. This contradicts to FLOSS principles (may be they plan to ban unofficial clients?), but that is, you won't be able to run Teleperl as-is. See https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md for next steps.
+Recently (August 2019) server bug was discovered in testing, when server sends constructors (CRC32 hash) from older scheme despite of requested level; you'll see `unknown object type` error (after which stream is in fact unusable so many more errors are just consequences). So you may need to experiment/generate from different layer files in `res` subdirectory. But beware that regularly updating server layer also requires changing client code logic (e.g. GUI client currently supports somehere at 78-82).
+
+## LEGAL ISSUES
+Publishing API ID/hash in source code prohibited by Telegram License / API Terms of Use. This contradicts to FLOSS principles (may be they plan to ban unofficial clients?), but that is, you won't be able to run Teleperl as-is. See https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md for next steps.
+
+This project is a _library_, not a feature-complete end-user client, and it's client application examples will never be. If you want to publish Teleperl-based end-user application, then you **MUST** implement features required by recent [Telegram API Terms of Use](https://core.telegram.org/api/terms).

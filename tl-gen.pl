@@ -276,7 +276,7 @@ for my $type (@types) {
 
 open my $f, ">$prefix/ObjTable.pm" or die "$!";
 
-print $f "package ".$prefix."::ObjTable;\nour %tl_type = (\n";
+print $f "package ".$prefix."::ObjTable;\nour \$GENERATED_FROM='$ARGV[0]';\nour %tl_type = (\n";
 for my $type (@types) {
     my ($path, $pkg) = pkgname($prefix, $type->{id});
     my ($basepath, $basepkg) = pkgname($prefix, $type->{type}{name});

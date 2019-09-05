@@ -84,7 +84,7 @@ AE::log fatal => "flag exists on start with $pid contents\n" if $pid;
 # catch all non-our Perl's warns to log with stack trace
 # we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
 $SIG{__WARN__} = sub {
-    scalar( grep /AnyEvent|log/, map { (caller($_))[0..3] } (1..3) )
+    scalar( grep /AnyEvent|\blog/, map { (caller($_))[0..3] } (1..3) )
         ? warn $_[0]
         : AE::log warn => &Carp::longmess;
 };

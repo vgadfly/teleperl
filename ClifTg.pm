@@ -72,7 +72,7 @@ sub init {
 
     # we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
     $SIG{__WARN__} = sub {
-        scalar( grep /AnyEvent|log/, map { (caller($_))[0..3] } (1..4) )
+        scalar( grep /AnyEvent|\blog/, map { (caller($_))[0..3] } (1..4) )
             ? warn $_[0]
             : AE::log warn => &Carp::longmess;
     };
@@ -111,7 +111,8 @@ sub init {
         session => $session,
         reconnect => 1,
         keepalive => 1,
-        noupdate => $opts->{noupdate},
+        noupdate => $opts->{noupdate} || !defined($session),
+        on_auth => sub { $app->render("Server error $_[0] $_[1], forgot `auth` command?\n") },
         debug => $opts->{debug}
     );
     $tg->{on_update} = sub {
@@ -138,7 +139,9 @@ sub init {
 sub command_map
 {
     argobject   => 'CliTg::Command::Argobject',
+    auth        => 'CliTg::Command::Auth',
     chats       => 'CliTg::Command::Chats',
+    describe    => 'CliTg::Command::Describe',
     dialogs     => 'CliTg::Command::Dialogs',
     history     => 'CliTg::Command::History',
     invoke      => 'CliTg::Command::Invoke',
@@ -281,6 +284,55 @@ sub report_update
             $self->render("\n$user is typing in $chat...");
         }
     }
+}
+
+package CliTg::Command::Auth;
+use base "CLI::Framework::Command::Meta";
+
+use Data::Dumper;
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "must be one argument or no args" unless @args < 2;
+}
+
+sub run
+{
+    my ($self, $opts, $code) = @_;
+    my $tg = $self->cache->get('tg');
+    my $app =$self->get_app;
+    my $conf = $self->cache->get('conf');
+
+    $tg->auth(
+        defined $code
+    	  ? (code    => $code)
+          : (phone   => $conf->{user}{phone}),
+        cb  => sub {
+            my $res = shift;
+
+            if ($res->isa('Telegram::Auth::SentCode')) {
+                $app->render("code sent:\n"
+                     . join("\n",
+                         map {
+                             my $class = ref $res->{$_};
+                             $class =~ s/Telegram::Auth:://;
+                             sprintf("%-17s:\t%s", $_, $class || $res->{$_});
+                         }
+                         grep { $_ ne 'flags' }
+                         keys %$res)
+                     . "\n"
+                     . "Use `auth <code>` command to enter it and finish login.\n"
+                );
+            }
+            elsif ($res->isa('Telegram::Auth::Authorization')) {
+                $app->render("Auth OK! Restart to enable updates, if you want");
+            }
+            else {
+                $app->render("unknown auth response " . Dumper($res));
+            }
+        }
+    );
 }
 
 package CliTg::Command::Message;
@@ -896,6 +948,8 @@ sub run
             $self->get_app->render(Dumper @_) 
         }
     );
+
+    return "Invoked request # $retid";
 }
 
 package CliTg::Command::Argobject;
@@ -1165,6 +1219,106 @@ sub run {
     my $argo = $self->cache->get('_argobjarr');
     local $Data::Dumper::Indent = 1;
     return Dumper(shift @$argo);
+}
+
+package CliTg::Command::Describe;
+use base "CLI::Framework::Command";
+
+use Telegram::ObjTable;
+
+# reuse some code
+*cnames = \@CliTg::Command::Invoke::cnames;
+*fnames = \@CliTg::Command::Invoke::fnames;
+*_func2class = \&CliTg::Command::Invoke::_func2class;
+
+sub usage_text {
+    q{
+    describe [--func] <class-or-TL-func-name>:
+
+    Display type information for Perl classes compiled from TL schema,
+    recursively, for you using `invoke` and `argobject` commands.
+
+    If no '--func' is specified, then any Perl Telegram::* class may be used
+    as argument; otherwise, it must be function name from schema/docs and class
+    will be guessed from object table.
+    }
+}
+
+sub option_spec {
+    [ "func=s", "schema function/method to get class from" ],
+}
+
+sub complete_arg
+{
+    my ($self, $lastopt, $argnum, $text, $attribs, $rawARGV) = @_;
+
+    if ($argnum == 1) {
+        if ($lastopt =~ /^--func$/) {
+            return @fnames;
+        }
+        else {
+            return @cnames;
+        }
+    }
+
+    return undef;
+}
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "Telegram::* subclass or schema.funcMethodName must be specified"
+        unless @args;
+
+    if ($opts->func) {
+        die "unknown TL function name"
+            unless scalar grep { $_ eq $args[0] } @fnames;
+    }
+    else {
+        require Class::Inspector->filename($args[0]);
+    }
+}
+
+sub _class_types {
+    my ($level, $class) = @_;
+
+    require Class::Inspector->filename($class);
+    no strict 'refs';
+
+    my $out = ("\t" x $level) . "Class:\t$class\tTL hash=" . ${"$class\::hash"} . "\n";
+    for (sort keys %{"$class\::TYPES"}) {
+        my $t = ${"$class\::TYPES"}{$_};
+        $out .= ("\t" x $level) . sprintf("%-17s\t%8s %9s %s\n",
+                            $_,
+                            ($t->{optional} ? "optional"  : ""),
+                            ($t->{vector}   ? "vector of" : ""),
+                            $t->{type},
+                        );
+        $out .= _class_types($level+1, $t->{type}) unless $t->{builtin};
+    }
+
+    return $out;
+}
+
+sub run
+{
+    my ($self, $opts, $arg) = @_;
+
+    my $out;
+    eval { $out = "Generated from '$Telegram::ObjTable::GENERATED_FROM'\n"; };
+
+    my $tl_type = (grep {
+        $opts->func and exists $_->{func} and $_->{func} eq $arg
+            or $_->{class} eq $arg
+    } values %Telegram::ObjTable::tl_type);
+
+    if ($tl_type->{func}) {
+        $out .= "TL function:\t" . $tl_type->{func} . "\treturns ";
+        $out .= "vector of " if $tl_type->{vector};
+        $out .= $tl_type->{returns} . "\n";
+    }
+
+    return $out . _class_types(0, $tl_type->{class});
 }
 
 package CliTg::Command::Config;

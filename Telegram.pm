@@ -227,7 +227,16 @@ sub auth
                 api_id => $self->{_app}{api_id},
                 api_hash => $self->{_app}{api_hash},
                 flags => 0
-        ));
+            ),
+            sub {
+                my $res = shift;
+                if ($res->isa('Telegram::Auth::SentCode')) {
+                    $self->{_code_hash} = $res->{phone_code_hash};
+                }
+
+                &{$arg{cb}}($res) if defined $arg{cb};
+            }
+	    );
     }
     else {
         $self->invoke(
@@ -235,7 +244,7 @@ sub auth
                 phone_number => $self->{session}{phone},
                 phone_code_hash => $self->{_code_hash},
                 phone_code => $arg{code}
-        ));
+        ), $arg{cb});
     }
 }
 
@@ -281,9 +290,11 @@ sub _handle_rpc_error
     AE::log warn => "RPC error %s on req %d", $err->{error_message}, $req_id;
     if ($err->{error_message} eq 'USER_DEACTIVATED') {
         $self->{_timer} = undef;
+        &{$self->{_code_cb}}($err->{error_code}, $err->{error_message}) if $self->{_code_cb};
     }
     if ($err->{error_message} eq 'AUTH_KEY_UNREGISTERED') {
         $self->{_timer} = undef;
+        &{$self->{_code_cb}}($err->{error_code}, $err->{error_message}) if $self->{_code_cb};
     }
     if ($err->{error_message} =~ /^FLOOD_WAIT_/) {
         my $to = $err->{error_message};
@@ -307,7 +318,7 @@ sub _handle_rpc_error
 
 sub _socket_err_cb
 {
-    my ($self, $err) = shift;
+    my ($self, $err) = @_;
     AE::log warn => "Socket error: $err";
 
     if ($self->{reconnect}) {
