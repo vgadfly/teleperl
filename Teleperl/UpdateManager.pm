@@ -53,7 +53,7 @@ sub sync
 
     $self->_lock;
 
-    if (not exists $self->{session} or $force) {
+    if (not exists $self->{session}{pts} or $force) {
         $self->event( 'query',
             Telegram::Updates::GetState->new, 
             sub {
@@ -267,7 +267,8 @@ sub _handle_upd_diff
     if ($diff->isa('Telegram::Updates::DifferenceSlice')) {
         $unlock = 0;
         $upd_state = $diff->{intermediate_state};
-        $self->{_tg}->invoke( Telegram::Updates::GetDifference->new( 
+        $self->event( 'query',
+            Telegram::Updates::GetDifference->new( 
                     date => $upd_state->{date},
                     pts => $upd_state->{pts},
                     qts => -1,

@@ -44,19 +44,22 @@ use Telegram::InputPeer;
 use base 'Class::Stateful';
 use fields qw(
     _mt _dc _app _proxy _timer _first _req _lock _flood_timer
-    _queue _upd reconnect session debug keepalive noupdate error
+    _queue _upd reconnect session debug keepalive noupdate error force_new_session
 );
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( noupdate keepalive reconnect debug ); # dc, proxy, app, session
+    my @args = qw( noupdate keepalive reconnect debug force_new_session );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     $self->SUPER::new( 
         init => undef,
         connecting => undef,
-        connected => [ sub { $self->_dequeue }, sub { $self->{_lock} = 1 } ],
+        connected => [ 
+            sub { $self->_dequeue; $self->event('connected') }, 
+            sub { $self->{_lock} = 1 } 
+        ],
         idle => undef
     );
     $self->_state('init');
@@ -127,20 +130,28 @@ sub _mt
         $self->{session}{mtproto}{instance} = $instance;
         $self->{session}{mtproto}{session} = $session;
     }
+    
+    my $force_new = $self->{force_new_session} // 0;
 
-    my $mt = MTProto->new( socket => $aeh, session => $self->{session}{mtproto}{session},
-            instance => $self->{session}{mtproto}{instance}, debug => $self->{debug}
+    my $mt = MTProto->new( 
+            socket => $aeh, 
+            session => ( $force_new ? {} : $self->{session}{mtproto}{session} ),
+            instance => $self->{session}{mtproto}{instance}, 
+            debug => $self->{debug}
     );
-    $mt->reg_cb( state => sub { shift; AE::log debug => "MTP state @_" } );
+    $self->{_mt} = $mt;
+    
+    $mt->reg_cb( state => sub { 
+            shift; AE::log debug => "MTP state @_";
+            if ($_[0] eq 'session_ok') {
+                $self->_state('connected')
+            }
+    } );
     $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
     $mt->reg_cb( message => sub { shift; $self->_msg_cb(@_) } );
     $mt->reg_cb( socket_error => sub { shift; $self->_socket_err_cb(@_) } );
 
     $mt->start_session;
-    $self->{_mt} = $mt;
-    $self->_state('connected');
-
-    $self->_dequeue; # unlock
 
     $self->{_timer} = AE::timer 0, 45, $self->_get_timer_cb;
 }
@@ -231,7 +242,7 @@ sub _handle_rpc_error
     my ($self, $err, $req_id) = @_;
     my $defer = 0;
 
-    &{$self->{on_error}}($err) if defined $self->{on_error};
+    $self->event(error => $err);
     $self->{error} = $err;
 
     AE::log warn => "RPC error %s on req %d", $err->{error_message}, $req_id;
@@ -302,7 +313,7 @@ sub _msg_cb
 
     # New session created, some updates can be missing
     if ( $msg->{object}->isa('MTProto::NewSessionCreated') ) {
-        AE::log info => "new session created, but nothing done"
+        $self->event('new_session');
     }
 }
 
