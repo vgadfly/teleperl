@@ -68,7 +68,7 @@ package MTProto;
 use Data::Dumper;
 
 use base 'Class::Stateful';
-use fields qw( debug session noack last_error 
+use fields qw( debug session instance noack last_error 
     _lock _pending _tcp_first _aeh _pq _queue );
 
 use AnyEvent;
@@ -150,15 +150,15 @@ sub aes_ige_dec
 sub gen_msg_key
 {
     my ($self, $plain, $x) = @_;
-    my $msg_key = substr( sha256(substr($self->{session}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
+    my $msg_key = substr( sha256(substr($self->{instance}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
     return $msg_key;
 }
 
 sub gen_aes_key
 {
     my ($self, $msg_key, $x) = @_;
-    my $sha_a = sha256( $msg_key . substr($self->{session}{auth_key}, $x, 36) );
-    my $sha_b = sha256( substr($self->{session}{auth_key}, 40+$x, 36) . $msg_key );
+    my $sha_a = sha256( $msg_key . substr($self->{instance}{auth_key}, $x, 36) );
+    my $sha_b = sha256( substr($self->{instance}{auth_key}, 40+$x, 36) . $msg_key );
     my $aes_key = substr($sha_a, 0, 8) . substr($sha_b, 8, 16) . substr($sha_a, 24, 8);
     my $aes_iv = substr($sha_b, 0, 8) . substr($sha_a, 8, 16) . substr($sha_b, 24, 8);
     return ($aes_key, $aes_iv);
@@ -167,7 +167,7 @@ sub gen_aes_key
 
 sub new
 {
-    my @args = qw(session debug noack);
+    my @args = qw(instance session debug noack);
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
@@ -244,13 +244,18 @@ sub start_session
 {
     my $self = shift;
 
-    return $self->_state('session_ok') if defined $self->{session}{auth_key};
+    # generate new session id unless we continue old session
+    unless (defined $self->{session}{id}) {
+        $self->{session}{id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+        $self->{session}{seq} = 0;
+    }
+
+    return $self->_state('session_ok') if defined $self->{instance}{auth_key};
 
     $self->_state('phase_one');
 
     AE::log debug => "starting new session\n" if $self->{debug};
 
-    $self->{session}{seq} = 0;
 
 #
 # STEP 1: PQ Request
@@ -412,7 +417,7 @@ sub _phase_two
     $dh_par->{encrypted_data} = $enc_data;
 
     # session auth key
-    $self->{session}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
+    $self->{instance}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
 
     $self->_state('phase_three');
     $self->_send_plain( pack( "(a4)*", $dh_par->pack ) );
@@ -431,7 +436,7 @@ sub _phase_three
     my $nonce = $self->{_pq}{nonce};
     my $new_nonce = $self->{_pq}{new_nonce};
     my $server_nonce = $self->{_pq}{server_nonce};
-    my $auth_key = $self->{session}{auth_key};
+    my $auth_key = $self->{instance}{auth_key};
     
     my @stream = unpack( "(a4)*", $data );
     return $self->_fatal('no data on phase three') unless @stream;
@@ -453,11 +458,9 @@ sub _phase_three
 
     AE::log debug => "session started";
 
-    $self->{session}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
-    $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
-    #$self->{session}{auth_key} = $auth_key;
-    $self->{session}{auth_key_id} = $auth_key_hash;
-    $self->{session}{auth_key_aux} = $auth_key_aux_hash;
+    $self->{instance}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
+    $self->{instance}{auth_key_id} = $auth_key_hash;
+    $self->{instance}{auth_key_aux} = $auth_key_aux_hash;
     
     # ecrypted connection established
     delete $self->{_pq};
@@ -571,13 +574,13 @@ sub _real_send
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
         -(12+length($message->{data})) % 16 + 12 );
 
-    my $plain = $self->{session}{salt} . $self->{session}{session_id} . $payload . $pad;
+    my $plain = $self->{instance}{salt} . $self->{session}{id} . $payload . $pad;
 
     my $msg_key = $self->gen_msg_key( $plain, 0 );
     my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
     my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
 
-    my $packet = $self->{session}{auth_key_id} . $msg_key . $enc_data;
+    my $packet = $self->{instance}{auth_key_id} . $msg_key . $enc_data;
 
     AE::log debug => "sending $message->{seq}:$message->{msg_id} ".
         "(".ref($message->{object})."), ".
@@ -654,7 +657,7 @@ sub _handle_msg
             }
         }
         if ($m->{object}->isa('MTProto::BadServerSalt')) {
-            $self->{session}{salt} = pack "Q<", $m->{object}{new_server_salt};
+            $self->{instance}{salt} = pack "Q<", $m->{object}{new_server_salt};
             $self->resend($m->{object}{bad_msg_id});
         }
         if ($m->{object}->isa('MTProto::BadMsgNotification')) {
@@ -670,7 +673,7 @@ sub _handle_msg
                 # start new session
                 # XXX: don't start new session for service messages, i.e. acks
                 if (exists $self->{_pending}{$bad_msg}){
-                    $self->{session}{session_id} = 
+                    $self->{session}{id} = 
                         Crypt::OpenSSL::Random::random_pseudo_bytes(8);
                     $self->{session}{seq} = 0;
                     $self->resend($bad_msg);

@@ -2,6 +2,8 @@ use Modern::Perl;
 
 package Teleperl::UpdateManager;
 
+use base "Class::Event";
+
 ## This package handles updates
 
 ##  On updates

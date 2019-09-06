@@ -26,8 +26,6 @@ use MTProto::Ping;
 
 ## Telegram API
 
-use TeleUpd;
-
 # Layer and Connection
 use Telegram::InvokeWithLayer;
 use Telegram::InitConnection;
@@ -69,9 +67,7 @@ sub new
 
     @$self{@args} = @arg{@args};
 
-    # XXX: handle old session files
     my $session = $arg{session};
-    $session->{mtproto} = {} unless exists $session->{mtproto};
     $self->{session} = $session;
     $self->{_first} = 1;
     $self->{_lock} = 1;
@@ -117,8 +113,23 @@ sub _mt
 {    
     my( $self, $aeh ) = @_;
 
-    my $mt = MTProto->new( socket => $aeh, session => $self->{session}{mtproto},
-            debug => $self->{debug}
+    # handle old mtp session
+    if ($self->{session}{mtproto}{session_id}) {
+        my $instance = {};
+        my @instance_keys = qw(auth_key auth_key_id auth_key_aux salt);
+        my $session = {};
+        my $mts = $self->{session}{mtproto};
+
+        @$instance{@instance_keys} = @$mts{@instance_keys};
+        $session->{id} = $mts->{session_id};
+        $session->{seq} = $mts->{seq};
+
+        $self->{session}{mtproto}{instance} = $instance;
+        $self->{session}{mtproto}{session} = $session;
+    }
+
+    my $mt = MTProto->new( socket => $aeh, session => $self->{session}{mtproto}{session},
+            instance => $self->{session}{mtproto}{instance}, debug => $self->{debug}
     );
     $mt->reg_cb( state => sub { shift; AE::log debug => "MTP state @_" } );
     $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
@@ -130,6 +141,8 @@ sub _mt
     $self->_state('connected');
 
     $self->_dequeue; # unlock
+
+    $self->{_timer} = AE::timer 0, 45, $self->_get_timer_cb;
 }
 
 sub _real_invoke
@@ -141,7 +154,7 @@ sub _real_invoke
             $self->{_req}{$req_id}{query} = $query;
             $self->{_req}{$req_id}{cb} = $cb if defined $cb;
             AE::log debug => "invoked $req_id for " . ref $query;
-            &{$self->{after_invoke}}($req_id, $query, $cb) if defined $self->{after_invoke};
+            $self->event('after_invoke', $req_id, $query, $cb);
         } 
     ] );
 }
@@ -274,7 +287,6 @@ sub _msg_cb
     my $msg = shift;
     AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
     AE::log trace => Dumper $msg->{object} if $self->{debug};
-    &{$self->{on_raw_msg}}( $msg->{object} ) if $self->{on_raw_msg};
 
     # RpcResults
     $self->_handle_rpc_result( $msg->{object} )
@@ -285,12 +297,12 @@ sub _msg_cb
         if ( $msg->{object}->isa('MTProto::RpcError') );
 
     # Updates
-    $self->{_upd}->handle_updates( $msg->{object} )
+    $self->event( update => $msg->{object} )
         if ( $msg->{object}->isa('Telegram::UpdatesABC') );
 
     # New session created, some updates can be missing
     if ( $msg->{object}->isa('MTProto::NewSessionCreated') ) {
-
+        AE::log info => "new session created, but nothing done"
     }
 }
 
@@ -298,7 +310,7 @@ sub _get_timer_cb
 {
     my $self = shift;
     return sub {
-        AE::log debug => "timer tick" if $self->{debug};
+        AE::log debug => "timer tick";
         $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
         $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) if $self->{keepalive};
     }
