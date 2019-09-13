@@ -147,9 +147,9 @@ sub _mt
                 $self->_state('connected')
             }
     } );
-    $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
+    $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_" } );
     $mt->reg_cb( message => sub { shift; $self->_msg_cb(@_) } );
-    $mt->reg_cb( socket_error => sub { shift; $self->_socket_err_cb(@_) } );
+    $mt->reg_cb( error => sub { shift; $self->_error_cb(@_) } );
 
     $mt->start_session;
 
@@ -195,7 +195,7 @@ sub invoke
                 lang_code => 'en',
                 query => $inner
         );
-        $query = Telegram::InvokeWithLayer->new( layer => 82, query => $conn ); 
+        $query = Telegram::InvokeWithLayer->new( layer => 91, query => $conn ); 
         $self->{_first} = 0;
     }
     if ($self->{_lock}) {
@@ -276,19 +276,23 @@ sub _handle_rpc_error
     return $defer;
 }
 
-sub _socket_err_cb
+sub _error_cb
 {
-    my ($self, $err) = shift;
-    AE::log warn => "Socket error: $err";
+    my ($self, $err) = @_;
+    #say Dumper @_;
+    AE::log warn => ref($err).": ".($err->{error_message} // $err->{error_code});
 
-    if ($self->{reconnect}) {
+    if ( $err->isa('MTProto::SocketError') and $self->{reconnect} ) {
         undef $self->{_mt};
         $self->start;
     }
     else {
-        my $e = { error_message => $err };
-        $self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
-        $self->_state('idle');
+        #my $e = { error_message => $err };
+        #$self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
+        $self->_state('fatal');
+        delete $self->{_timer};
+        # throw it again
+        $self->event( error => $err );
     }
 }
 
@@ -321,9 +325,11 @@ sub _get_timer_cb
 {
     my $self = shift;
     return sub {
+        local *__ANON__ = 'Telegram::_timer_cb';
         AE::log debug => "timer tick";
         $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
-        $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) if $self->{keepalive};
+        $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) 
+            if $self->{keepalive};
     }
 }
 

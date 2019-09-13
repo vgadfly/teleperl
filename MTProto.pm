@@ -199,6 +199,7 @@ sub _get_read_cb
 {
     my $self = shift;
     return sub {
+        local *__ANON__ = 'MTProto::_read_cb';
         # all reads start with recving packet length
         $self->{_aeh}->unshift_read( chunk => 4, sub {
                 my $len = unpack "L<", $_[1];
@@ -222,9 +223,12 @@ sub _get_error_cb
 {
     my $self = shift;
     return sub {
+        local *__ANON__ = 'MTProto::_error_cb';
         my ($hdl, $fatal, $msg) = @_;
-        $self->event( socket_error => $msg );
-        $self->{last_error} = {message => $msg};
+        AE::log error => $!.':'.$msg;
+        my $e = { error_message => $msg };
+        $self->event( error => bless($e, 'MTProto::SocketError') );
+        $self->{last_error} = $e;
         $hdl->destroy;
         $self->_state('fatal');
     }
@@ -560,7 +564,13 @@ sub _real_send
     my ($obj, $id_cb, $is_service) = @$msg;
     my $seq = $self->{session}{seq};
     $seq += 1 unless $is_service;
-    my $message = MTProto::Message->new( $seq, $obj );
+    my $message = eval { MTProto::Message->new( $seq, $obj ) };
+    if ($@) {
+        my $e = bless( { error_message => $@ }, 'MTProto::PackException' );
+        $self->event( error =>  $e );
+        $self->_state('fatal');
+        return;
+    }
     $self->{session}{seq} += 2 unless $is_service;
     $self->{_pending}{$message->{msg_id}} = $msg unless $is_service;
 
@@ -570,7 +580,7 @@ sub _real_send
         $self->{_tcp_first} = 0;
     }
     
-    my $payload = $message->pack;
+    my $payload = eval { $message->pack };
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
         -(12+length($message->{data})) % 16 + 12 );
 
@@ -592,6 +602,7 @@ sub _real_send
 sub _handle_error
 {
     my ($self, $err) = @_;
+    die "should not happen";
     my $error = unpack( "l<", $err );
     $self->event( mt_error => $error );
     $self->{last_error} = { code => $error };
@@ -682,8 +693,10 @@ sub _handle_msg
             else {
                 # other errors, that cannot be fixed in runtime
                 # XXX: handle 16 and 17, sync clock
-                $self->event( mt_error => $ecode );
+                my $e = { error_code => $ecode };
+                $self->event( error => bless($e, 'MTProto::Error') );
                 $self->_state('fatal');
+                return;
             }
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {

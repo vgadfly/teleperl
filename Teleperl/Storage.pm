@@ -19,6 +19,11 @@ sub new
     return $self;
 }
 
+sub save
+{
+    # TODO: save all
+}
+
 sub tg_param
 {
     return %{shift->{config}};

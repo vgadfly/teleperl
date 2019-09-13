@@ -28,6 +28,7 @@ sub new
 
 sub pack_int
 {
+    confess("undefined value") unless defined $_[0];
     pack "l<", $_[0];
 }
 
@@ -39,6 +40,7 @@ sub unpack_int
 
 sub pack_nat
 {
+    confess("undefined value") unless defined $_[0];
     pack "L<", $_[0];
 }
 
@@ -50,6 +52,7 @@ sub unpack_nat
 
 sub pack_long
 {
+    confess ("undefined value") unless defined $_[0];
     local $_;
     $_ = pack "q<", $_[0];
 
@@ -68,6 +71,7 @@ sub unpack_long
 
 sub pack_string
 {
+    confess("undefined value") unless defined $_[0];
     local $_;
     my $len = length $_[0];
     
@@ -114,6 +118,7 @@ sub unpack_bytes
 
 sub pack_int128
 {
+    confess("undefined value") unless defined $_[0];
     local $_;
     $_ = $_[0]->to_bin();
     my $prepend = 16 - length $_;
@@ -131,6 +136,7 @@ sub unpack_int128
 
 sub pack_int256
 {
+    confess("undefined value") unless defined $_[0];
     local $_;
     $_ = $_[0]->to_bin();
     my $prepend = 32 - length $_;
@@ -148,6 +154,7 @@ sub unpack_int256
 
 sub pack_double
 {
+    confess("undefined value") unless defined $_[0];
     local $_;
     $_ = pack "d", $_[0];
 

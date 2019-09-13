@@ -32,7 +32,7 @@ sub new
 
     my $storage = Teleperl::Storage->new();
 
-    $self->{_tg} = Telegram->new( $storage->tg_param, $storage->tg_state, force_new_session => $new_session );
+    $self->{_tg} = Telegram->new( $storage->tg_param, $storage->tg_state, force_new_session => $new_session, keepalive => 1 );
     $self->{_upd} = Teleperl::UpdateManager->new( $new_session ? {} : $storage->upd_state );
     $self->{_cache} = Teleperl::PeerCache->new( session => $storage->peer_cache );
     $self->{_storage} = $storage;
@@ -42,6 +42,7 @@ sub new
             AE::log info => "connected";
             $self->{_upd}->sync 
     });
+    $self->{_tg}->reg_cb( error => sub { shift; $self->{_storage}->save; $self->event( error => @_ ) } );
     $self->{_tg}->reg_cb( update => sub { shift; $self->{_upd}->handle_updates(@_) } );
     
     $self->{_upd}->reg_cb( query => sub { shift; $self->{_tg}->invoke(@_) } );
