@@ -223,6 +223,7 @@ sub _handle_short_update
 {
     my ($self, $upd) = @_;
 
+    # XXX: should unfold short update
     $self->event( update => $upd );
     #my $in_msg = $self->message_from_update( $upd );
     #$self->{_tg}{on_update}->( $in_msg ) if $self->{_tg}{on_update};
@@ -329,6 +330,7 @@ sub _handle_channel_diff
         for my $msg (@{$diff->{messages}}) {
             $self->event( update => $msg );
         }
+        $self->event(sync_lost => $channel);
 
         return;
     }

@@ -13,7 +13,8 @@ use AnyEvent::Impl::Perl;
 use AnyEvent;
 use AnyEvent::Log;
 
-use Telegram;
+use Teleperl;
+use Teleperl::Storage;
 
 use Data::Dumper;
 
@@ -103,20 +104,10 @@ sub init {
               );
         };
     }
+    my $stor = Teleperl::Storage->new;
+    my $tg = Teleperl->new( storage => $stor );
 
-    my $tg = Telegram->new(
-        dc => $conf->{dc},
-        app => $conf->{app},
-        proxy => $conf->{proxy},
-        session => $session,
-        reconnect => 1,
-        keepalive => 1,
-        noupdate => $opts->{noupdate},
-        debug => $opts->{debug}
-    );
-    $tg->{on_update} = sub {
-        $app->report_update(@_);
-    };
+    $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
     $tg->start;
     #$tg->update;
 

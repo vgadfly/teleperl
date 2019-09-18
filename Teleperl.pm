@@ -30,7 +30,9 @@ sub new
     my $new_session = $arg{force_new_session} // 0;
     AE::log debug => "force_new_session?=".$new_session;
 
-    my $storage = Teleperl::Storage->new();
+    croak("Teleperl::Storage required") 
+        unless defined $arg{storage} and $arg{storage}->isa('Teleperl::Storage');
+    my $storage = $arg{storage};
 
     $self->{_tg} = Telegram->new( $storage->tg_param, $storage->tg_state, force_new_session => $new_session, keepalive => 1 );
     $self->{_upd} = Teleperl::UpdateManager->new( $new_session ? {} : $storage->upd_state );
@@ -63,6 +65,9 @@ sub start
 sub _handle_update
 {
     my ($self, $update) = @_;
+
+    # XXX
+    $self->event( update => $update );
 
     AE::log trace => "update: ". Dumper($update);
 
