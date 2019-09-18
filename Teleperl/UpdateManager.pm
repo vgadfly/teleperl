@@ -111,16 +111,16 @@ sub _check_pts
     if (defined $local_pts and $local_pts + $count < $pts) {
         AE::log debug => "local_pts=$local_pts, pts=$pts, count=$count, channel=".($channel//"");
         if (defined $channel) {
-            my $channel_peer = $self->{_tg}->peer_from_id( $channel );
             $self->event( 'query',
                 Telegram::Updates::GetChannelDifference->new(
-                    channel => $channel_peer,
+                    channel => Telegram::InputChannel->new( channel_id => $channel ),
                     filter => Telegram::ChannelMessagesFilterEmpty->new,
                     pts => $local_pts,
                     limit => 0
                 ),
-                sub { $self->_handle_channel_diff( $channel, @_ ) }
-            ) if defined $channel_peer;
+                sub { $self->_handle_channel_diff( $channel, @_ ) },
+                fix_input => 1
+            );
         }
         else {
             $self->event( 'query',
@@ -173,19 +173,19 @@ sub _handle_update
     $self->_debug_print_update($upd);
     
     if ($upd->isa('Telegram::UpdateChannelTooLong')) {
-        my $channel = $self->{_tg}->peer_from_id( $upd->{channel_id} );
         my $local_pts = $self->{session}{channel_pts}{$upd->{channel_id}};
         AE::log warn => "rcvd ChannelTooLong for $upd->{channel_id} but no local pts thus no updates"
             unless defined $local_pts;
         $self->event( 'query',
             Telegram::Updates::GetChannelDifference->new(
-                channel => $channel,
+                channel => Telegram::InputChannel->new( channel_id => $upd->{channel_id} ),
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
                 pts => $local_pts,
                 limit => 0
             ),
-            sub { $self->_handle_channel_diff( $upd->{channel_id}, @_ ) }
-        ) if defined $channel and $local_pts;
+            sub { $self->_handle_channel_diff( $upd->{channel_id}, @_ ) },
+            fix_input => 1
+        ) if defined $local_pts;
         return;
     }
     

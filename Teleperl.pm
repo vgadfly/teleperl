@@ -45,7 +45,7 @@ sub new
     $self->{_tg}->reg_cb( error => sub { shift; $self->{_storage}->save; $self->event( error => @_ ) } );
     $self->{_tg}->reg_cb( update => sub { shift; $self->{_upd}->handle_updates(@_) } );
     
-    $self->{_upd}->reg_cb( query => sub { shift; $self->{_tg}->invoke(@_) } );
+    $self->{_upd}->reg_cb( query => sub { shift; $self->invoke(@_) } );
     $self->{_upd}->reg_cb( cache => sub { shift; $self->{_cache}->cache(@_) } );
     $self->{_upd}->reg_cb( update => sub { shift; $self->_handle_update(@_) } );
 
@@ -69,6 +69,38 @@ sub _handle_update
     #if ( $update->isa('Telegram::Message') ) {
     #    ...
     #}
+}
+
+sub _recursive_input_access_fix
+{
+    my ($self, $obj) = @_;
+
+    AE::log debug => "fixing ".ref($obj);
+
+    local $_;
+    for (values %$obj) {
+        if ($_->isa('Telegram::InputChannel') or $_->isa('Telegram::InputPeerChannel')) {
+            $_->{access_hash} = $self->{cache}->access_hash($_->{channel_id})
+        } 
+        elsif ($_->isa('Telegram::InputUser') or $_->isa('Telegram::InputPeerUser')) {
+            $_->{access_hash} = $self->{cache}->access_hash($_->{user_id}) 
+        }
+        elsif ($_->isa('TL::Object')) {
+            $self->_recursive_input_access_fix($_) or return 0;
+        }
+    }
+    return 1;
+}
+
+sub invoke
+{
+    my ($self, $query, $cb, %param) = @_;
+
+    my $fix_input = $param{fix_input} // 0;
+    if ($fix_input) {
+        $self->_recursive_input_access_fix($query) or return;
+    }
+    $self->{_tg}->invoke($query, $cb);
 }
 
 1;

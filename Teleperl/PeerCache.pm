@@ -121,6 +121,22 @@ sub name_to_id
     return undef;
 }
 
+sub access_hash
+{
+    my ($self, $id) = @_;
+
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
+
+    if (exists $users->{$id}) {
+        return $users->{$id}{access_hash}
+    }
+    if (exists $chats->{$id}) {
+        return $chats->{$id}{access_hash};
+    }
+    return undef;
+}
+
 sub input_peer
 {
     my ($self, $nick) = @_;
