@@ -15,7 +15,7 @@ sub usage_text {
 }
 
 sub run {
-    my ($self, $opts, @args) = @_;
+    my ($self, @args) = @_;
 
     return $self->menu_txt(@args);
 }
