@@ -699,6 +699,15 @@ sub _handle_msg
                 return;
             }
         }
+        if ($m->{object}->isa('MTProto::MsgDetailedInfoABC')) {
+            $self->event( error => bless(
+                { error_message =>"Unhandled MsgDetailedInfo" },
+                'MTProto::Error'
+                )
+            );
+            $self->_state('fatal');
+            return;
+        }
         if ($m->{object}->isa('MTProto::RpcResult')) {
             #AE::log trace => Dumper $m->{object};
             my $id = $m->{object}{req_msg_id};
