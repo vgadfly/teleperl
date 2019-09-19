@@ -85,10 +85,10 @@ sub _recursive_input_access_fix
     local $_;
     for (values %$obj) {
         if ($_->isa('Telegram::InputChannel') or $_->isa('Telegram::InputPeerChannel')) {
-            $_->{access_hash} = $self->{cache}->access_hash($_->{channel_id})
+            $_->{access_hash} = $self->{_cache}->access_hash($_->{channel_id})
         } 
         elsif ($_->isa('Telegram::InputUser') or $_->isa('Telegram::InputPeerUser')) {
-            $_->{access_hash} = $self->{cache}->access_hash($_->{user_id}) 
+            $_->{access_hash} = $self->{_cache}->access_hash($_->{user_id}) 
         }
         elsif ($_->isa('TL::Object')) {
             $self->_recursive_input_access_fix($_) or return 0;

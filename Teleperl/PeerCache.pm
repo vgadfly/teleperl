@@ -10,6 +10,10 @@ sub new
     $self = bless( {}, $self ) unless ref $self;
 
     $self->{session} = $arg{session};
+    AE::log info => "%d users, %d chats cached", 
+        scalar(keys(%{$self->{session}{users}})), 
+        scalar(keys(%{$self->{session}{chats}}))
+    ;
 
     return $self;
 }
