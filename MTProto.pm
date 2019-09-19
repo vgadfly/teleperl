@@ -69,7 +69,7 @@ use Data::Dumper;
 
 use base 'Class::Stateful';
 use fields qw( debug session instance noack last_error 
-    _lock _pending _tcp_first _aeh _pq _queue );
+    _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack );
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -181,6 +181,9 @@ sub new
     
     $self->{_tcp_first} = 1;
     $self->{_lock} = 0;
+    $self->{_wsz} = 1;
+    $self->{_rtt_ack} = 1;
+    $self->{_queue} = [];
     $self->_state('init');
     
     @$self{@args} = @arg{@args};
@@ -506,6 +509,10 @@ sub _send_plain
 sub _enqueue
 {
     my ($self, $in_msg) = @_;
+    
+    AE::log debug => "EQ: pending ".scalar(keys %{$self->{_pending}}).
+        ", in q ".scalar(@{$self->{_queue}});
+    
     push @{$self->{_queue}}, $in_msg;
 }
 
@@ -519,7 +526,14 @@ sub _dequeue
 
     $self->{_lock} = 0;
 
-    $self->_real_send($_) while ($_ = shift @{$self->{_queue}});
+    AE::log debug => "DQ: pending ".scalar(keys %{$self->{_pending}}).
+        ", in q ".scalar(@{$self->{_queue}});
+
+    while ( scalar(keys %{$self->{_pending}}) < $self->{_wsz} ) {
+        $_ = shift @{$self->{_queue}};
+        last unless $_;
+        $self->_real_send($_);
+    }
 }
 
 ## send encrypted message(s)
@@ -547,7 +561,7 @@ sub send
         $self->_enqueue($_) for @msg;
         return;
     }
-    if ( $self->{_lock} ) {
+    if ( $self->{_lock} or scalar(keys %{$self->{_pending}}) >= $self->{_wsz} ) {
         $self->_enqueue($_) for @msg;
     }
     else {
@@ -660,16 +674,18 @@ sub _handle_msg
         my $m = $msg;
         if ($m->{object}->isa('MTProto::Pong')) {
             delete $self->{_pending}{$m->{object}{msg_id}};
+            $self->_dequeue;
         }
         if ($m->{object}->isa('MTProto::MsgsAck')) {
             for (@{$m->{object}{msg_ids}}) {
                 $self->{_pending}{$_}[1]->($_) if defined $self->{_pending}{$_}[1];
                 delete $self->{_pending}{$_};
+                $self->_dequeue;
             }
         }
         if ($m->{object}->isa('MTProto::BadServerSalt')) {
             $self->{instance}{salt} = pack "Q<", $m->{object}{new_server_salt};
-            $self->resend($m->{object}{bad_msg_id});
+            $self->_resend($m->{object}{bad_msg_id});
         }
         if ($m->{object}->isa('MTProto::BadMsgNotification')) {
             # sesssion not in sync: destroy and make new
@@ -687,7 +703,7 @@ sub _handle_msg
                     $self->{session}{id} = 
                         Crypt::OpenSSL::Random::random_pseudo_bytes(8);
                     $self->{session}{seq} = 0;
-                    $self->resend($bad_msg);
+                    $self->_resend($bad_msg);
                 }
             }
             else {
@@ -713,6 +729,7 @@ sub _handle_msg
             my $id = $m->{object}{req_msg_id};
             $self->{_pending}{$id}[1]->($id) if defined $self->{_pending}{$id}[1];
             delete $self->{_pending}{$id};
+            $self->_dequeue;
         }
         if (($m->{seq} & 1) and not $self->{noack} and not $in_container) {
             # ack content-related messages
@@ -760,17 +777,18 @@ sub _ack
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
     #$ack->{msg_ids} = \@msg_ids;
-    $self->send( [$ack, undef, 1] );
+    $self->_real_send( [$ack, undef, 1] );
 }
 
 ## resend message by id, if it's pending (was not ACKed)
-sub resend
+sub _resend
 {
     my ($self, $id) = @_;
 
     if (exists $self->{_pending}{$id}){
-        AE::log trace => "resending $id";
-        $self->send( $self->{_pending}{$id} );
+        AE::log debug => "resending $id";
+        $self->_real_send( $self->{_pending}{$id} );
+        delete $self->{_pending}{$id};
     }
 }
 
