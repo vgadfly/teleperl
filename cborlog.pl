@@ -23,6 +23,9 @@ use Telegram::Messages::GetDialogs;
 use Telegram::InputPeer;
 use Telegram::Messages::GetHistory;
 
+use Telegram::ObjTable; # be independent if someone regens schema while we work
+require $_ for map { $_->{file} } values %Telegram::ObjTable::tl_type;
+
 use Data::Dumper;
 use Scalar::Util qw(reftype);
 
@@ -91,6 +94,7 @@ $SIG{__WARN__} = sub {
 $SIG{__DIE__} = sub {
     my $mess = &Carp::longmess;
 #    $mess =~ s/( at .*?\n)\1/$1/s;    # Suppress duplicate tracebacks
+    save_cbor() unless $mess =~ /CBOR|save_cbor/ms; # don't loose data if it's serv err
     AE::log alert => $mess;
     die $mess;
 };
@@ -198,7 +202,13 @@ sub save_cbor {
 
     my $fname = get_fname();
 
-    $cbor_data = $CBOR::XS::MAGIC . $cbor_data unless -e $fname;
+    $cbor_data = $CBOR::XS::MAGIC
+               . $cbor->encode({    # what version decoder should use
+                       time => time,
+                       schema => $Telegram::ObjTable::GENERATED_FROM,
+                   })
+               . $cbor_data
+        unless -e $fname;
 
     sysopen my $fh, $fname, AnyEvent::IO::O_CREAT | AnyEvent::IO::O_WRONLY | AnyEvent::IO::O_APPEND, 0666
         or AE::log fatal => "can't open $fname: $!";

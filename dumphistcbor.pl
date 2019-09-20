@@ -19,7 +19,9 @@ eval "use Time::HiRes qw(time);";
 
 use Telegram;
 
-use Telegram::Messages::GetDialogs;
+use Telegram::ObjTable;
+
+use Telegram::Help::GetNearestDc;
 use Telegram::InputPeer;
 use Telegram::Messages::GetHistory;
 use Telegram::Users::GetFullUser;
@@ -207,7 +209,13 @@ sub save_cbor {
 
     my $fname = get_fname();
 
-    $cbor_data = $CBOR::XS::MAGIC . $cbor_data unless -e $fname;
+    $cbor_data = $CBOR::XS::MAGIC
+               . $cbor->encode({    # what version decoder should use
+                       time => time,
+                       schema => $Telegram::ObjTable::GENERATED_FROM,
+                   })
+               . $cbor_data
+        unless -e $fname;
 
     sysopen my $fh, $fname, AnyEvent::IO::O_CREAT | AnyEvent::IO::O_WRONLY | AnyEvent::IO::O_APPEND, 0666
         or AE::log fatal => "can't open $fname: $!";
@@ -257,13 +265,8 @@ my $cond = AnyEvent->condvar;
 
 # XXX FIXME make first request dummy 'coz error 32 possible :(
 $tg->invoke(
-    Telegram::Messages::GetDialogs->new(
-        offset_date => 0,
-        offset_id => 0,
-        offset_peer => Telegram::InputPeerEmpty->new,
-        limit => -1,
-        hash => 0,
-    ), sub { "noop" }
+    Telegram::Help::GetNearestDc->new,
+    sub { "noop" }
 );
 
 my $peer = $ARGV[0];
