@@ -14,6 +14,7 @@ use AnyEvent;
 use AnyEvent::Log;
 
 use Telegram;
+use Teleperl::Util qw(:DEFAULT get_AE_log_format_cb);
 
 use Data::Dumper;
 
@@ -50,59 +51,10 @@ sub init {
     $AnyEvent::Log::FILTER->level(
         $opts->{debug} ? ($opts->{debug}>1 ? "trace" : "debug") :
             $opts->{verbose} ? "info" : "note");
-    $AnyEvent::Log::LOG->fmt_cb(sub {
-        my ($time, $ctx, $lvl, $msg) = @_;
+    $AnyEvent::Log::LOG->fmt_cb( get_AE_log_format_cb() );
 
-        my $ts = POSIX::strftime("%H:%M:%S", localtime $time)
-               . sprintf ".%04d", 1e4 * ($time - int($time));
-
-        # XXX we need just timestamp! but AE has no cb for just time..
-        # XXX so copypaste rest from AnyEvent::Log
-        my $ct = " ";
-        my @res;
-
-        for (split /\n/, sprintf "%-5s %s: %s", $AnyEvent::Log::LEVEL2STR[$_[2]], $_[1][0], $_[3]) {
-            push @res, "$ts$ct$_\n";
-            $ct = " + ";
-        }
-
-        join "", @res
-
-    });
-
-    # we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
-    $SIG{__WARN__} = sub {
-        scalar( grep /AnyEvent|\blog/, map { (caller($_))[0..3] } (1..4) )
-            ? warn $_[0]
-            : AE::log warn => &Carp::longmess;
-    };
-    # XXX workaround crutch of AE::log not handling utf8 & function name
-    {
-        no strict 'refs';
-        no warnings 'redefine';
-        *AnyEvent::log    = *AE::log    = sub ($$;@) {
-            AnyEvent::Log::_log
-              $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-              $_[0],
-              map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-                  ($opts->verbose
-                      ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                      : $_[1]),
-                   (@_ > 2 ? @_[2..$#_] : ())
-              );
-        };
-        *AnyEvent::logger = *AE::logger = sub ($;$) {
-            AnyEvent::Log::_logger
-              $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-              $_[0],
-              map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-                  ($opts->verbose
-                      ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                      : $_[1]),
-                   (@_ > 2 ? @_[2..$#_] : ())
-              );
-        };
-    }
+    install_AE_log_SIG_WARN();
+    install_AE_log_crutch();
 
     my $tg = Telegram->new(
         dc => $conf->{dc},
