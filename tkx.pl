@@ -28,6 +28,8 @@ use Telegram::Messages::GetHistory;
 use Telegram::Messages::ReadHistory;
 use Telegram::Channels::ReadHistory;
 
+use Teleperl::Util qw(:DEFAULT get_AE_log_format_cb);
+use Scalar::Util qw(blessed);
 use Data::Dumper;
 
 sub option_spec {
@@ -60,46 +62,11 @@ $AnyEvent::Log::FILTER->level(
 $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path vs file
 
 # XXX workaround crutch of AE::log not handling utf8 & function name
-{
-    no strict 'refs';
-    no warnings 'redefine';
-    *AnyEvent::log    = *AE::log    = sub ($$;@) {
-        AnyEvent::Log::_log
-          $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-          $_[0],
-          map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-              ($opts->verbose
-                  ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                  : $_[1]),
-               (@_ > 2 ? @_[2..$#_] : ())
-          );
-    };
-    *AnyEvent::logger = *AE::logger = sub ($;$) {
-        AnyEvent::Log::_logger
-          $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-          $_[0],
-          map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-              ($opts->verbose
-                  ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                  : $_[1]),
-               (@_ > 2 ? @_[2..$#_] : ())
-          );
-    };
-}
+install_AE_log_crutch();
 
 # catch all non-our Perl's warns to log with stack trace
-# we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
-$SIG{__WARN__} = sub {
-    scalar( grep /AnyEvent|\blog/, map { (caller($_))[0..3] } (1..3) )
-        ? warn $_[0]
-        : AE::log warn => &Carp::longmess;
-};
-$SIG{__DIE__} = sub {
-    my $mess = &Carp::longmess;
-#    $mess =~ s/( at .*?\n)\1/$1/s;    # Suppress duplicate tracebacks
-    AE::log alert => $mess;
-    die $mess;
-};
+install_AE_log_SIG_WARN();
+install_AE_log_SIG_DIE();
 
 my $tg = Telegram->new(
     dc => $conf->{dc},
@@ -457,7 +424,7 @@ sub onMsgListSelect {
     AE::log debug => "onMsgListSelect $id";
     $statusText = "parent=$parent msgid=".($curSelMsgId//"");
 
-    render_msg($messageStore{$parent}->{$msgid}) if $msgid;
+    render_msg($UI{txtMessage}, $messageStore{$parent}->{$msgid}) if $msgid;
 }
 
 sub set_debug {
@@ -625,51 +592,72 @@ sub setup_msglist {
 sub presetup_tags {
     my $text = shift;   # widget
 
-    # TODO font_actual
-    $text->tag_configure('Telegram::MessageEntityMention',      -foreground => 'red', );
-    $text->tag_configure('Telegram::MessageEntityHashtag',      -foreground => 'darkgreen', );
-    $text->tag_configure('Telegram::MessageEntityBotCommand',   -foreground => 'brown', );
-    $text->tag_configure('Telegram::MessageEntityUrl',          -foreground => 'blue', -underline => 1);
-    $text->tag_configure('Telegram::MessageEntityTextUrl',      -foreground => 'blue', -underline => 1);#url
-    $text->tag_configure('Telegram::TextUrl',                   -foreground => 'blue', -underline => 1);#url webpage_id 
-    $text->tag_configure('Telegram::MessageEntityEmail',        -foreground => 'blue',);
-    $text->tag_configure('Telegram::TextEmail',                 -foreground => 'blue',); # email
-    $text->tag_configure('Telegram::MessageEntityBold',         -font => "-weight bold");
-    $text->tag_configure('Telegram::TextBold',                  -font => "-weight bold");
-    $text->tag_configure('Telegram::MessageEntityItalic',       -font => "-slant italic");
-    $text->tag_configure('Telegram::TextItalic',                -font => "-slant italic");
-    $text->tag_configure('Telegram::TextUnderline',             -underline => 1);
-    $text->tag_configure('Telegram::TextStrike',                -overstrike=> 1);
-    $text->tag_configure('Telegram::MessageEntityCode',         -foreground => 'red', -font => 'TkFixedFont');
-    $text->tag_configure('Telegram::MessageEntityPre',          -font => 'TkFixedFont', ); # language
-    $text->tag_configure('Telegram::TextFixed',                 -font => 'TkFixedFont', );
-    $text->tag_configure('Telegram::MessageEntityMentionName',  -foreground => 'brown', ); # user_id
-    $text->tag_configure('Telegram::InputMessageEntityMentionName', -foreground => '#8e68c9', ); # user_id
-    $text->tag_configure('Telegram::MessageEntityPhone',        -foreground => '#69e34b', );
-    $text->tag_configure('Telegram::MessageEntityCashtag',      -foreground => '#4e743f', );
-    $text->tag_configure('Title',                               -font => "Helvetica 18 bold", );
-    $text->tag_configure('Caption',                             -font => 'TkCaptionFont', );
-    $text->tag_configure('Subtitle',                            -font => "Helvetica 16", );
-    $text->tag_configure('Header',                              -font => "Helvetica 14 bold", );
-    $text->tag_configure('Subheader',                           -font => "-weight bold", );
-    $text->tag_configure('Paragraph',                           -font => "", );
-    $text->tag_configure('Preformatted',                        -font => 'TkFixedFont', );
-    $text->tag_configure('Footer',                              -font => 'TkSmallCaptionFont', );
-    $text->tag_configure("MessageService",                      -background => "#a000a0");
-    $text->tag_configure("List",                                -lmargin2 => "5m", -tabs => "5m");
-    $text->tag_configure("Blockquote",                          -lmargin1 => "1c", -lmargin2 => "1c");
-    $text->tag_configure("out",                                 -background => "#f6fbed");
+    # TODO font_actual (especially for subscripts/superscripts)
+    # '::' correspond to generated classes, others are manual and from ::PageBlock
+    # TODO elided text for additional fileds (see comments like '#url')
+
+    # usual message formatting
+    $text->tag_configure('::MessageEntityMention',      -foreground => 'red', );
+    $text->tag_configure('::MessageEntityHashtag',      -foreground => 'darkgreen', );
+    $text->tag_configure('::MessageEntityBotCommand',   -foreground => 'brown', );
+    $text->tag_configure('::MessageEntityUrl',          -foreground => 'blue', -underline => 1);
+    $text->tag_configure('::MessageEntityTextUrl',      -foreground => 'blue', -underline => 1);#url
+    $text->tag_configure('::MessageEntityEmail',        -foreground => 'blue',);
+    $text->tag_configure('::MessageEntityBold',         -font => "-weight bold");
+    $text->tag_configure('::MessageEntityItalic',       -font => "-slant italic");
+    $text->tag_configure('::MessageEntityCode',         -foreground => 'red', -font => 'TkFixedFont'); # as on Mac
+    $text->tag_configure('::MessageEntityPre',          -font => 'TkFixedFont', ); # language
+    $text->tag_configure('::MessageEntityMentionName',  -foreground => 'brown', ); # user_id
+    $text->tag_configure('::InputMessageEntityMentionName', -foreground => '#8e68c9', ); # user_id
+    $text->tag_configure('::MessageEntityPhone',        -foreground => '#69e34b', );
+    $text->tag_configure('::MessageEntityCashtag',      -foreground => '#4e743f', );
+    $text->tag_configure('::MessageEntityStrike',       -overstrike=> 1);
+    $text->tag_configure('::MessageEntityUnderline',    -underline => 1);
+    $text->tag_configure('::MessageEntityBlockquote',   -lmargin1 => "1c", -lmargin2 => "1c", -background => 'gray');
+
+    # Instant View: RichText
+    $text->tag_configure('::TextUrl',                   -foreground => 'blue', -underline => 1);#url webpage_id 
+    $text->tag_configure('::TextEmail',                 -foreground => 'blue',); # email
+    $text->tag_configure('::TextBold',                  -font => "-weight bold");
+    $text->tag_configure('::TextItalic',                -font => "-slant italic");
+    $text->tag_configure('::TextUnderline',             -underline => 1);
+    $text->tag_configure('::TextStrike',                -overstrike=> 1);
+    $text->tag_configure('::TextFixed',                 -font => 'TkFixedFont', );
+    $text->tag_configure('::TextSubscript',             -offset => '6p',  -font => "-size 8" );
+    $text->tag_configure('::TextSuperscript',           -offset => '-6p', -font => "-size 8");
+    $text->tag_configure('::TextMarked',                -foreground => '#ffa0ff', );
+    $text->tag_configure('::TextPhone',                 -foreground => '#69e34b',); #phone
+    $text->tag_configure('::TextAnchor',                -foreground => 'blue', ); #name
+
+    # Instant View & others
+    $text->tag_configure('Title',                       -font => "Helvetica 18 bold", );
+    $text->tag_configure('Caption',                     -font => 'TkCaptionFont', );
+    $text->tag_configure('Subtitle',                    -font => "Helvetica 16", );
+    $text->tag_configure('Header',                      -font => "Helvetica 14 bold", );
+    $text->tag_configure('Subheader',                   -font => "-weight bold", );
+    $text->tag_configure('Paragraph',                   -font => "", );
+    $text->tag_configure('Preformatted',                -font => 'TkFixedFont', );
+    $text->tag_configure('Footer',                      -font => 'TkSmallCaptionFont', );
+    $text->tag_configure('Kicker',                      -font => 'TkSmallCaptionFont', ); #XXX wtf is this?
+    $text->tag_configure('Small',                       -font => 'TkSmallCaptionFont', );
+    $text->tag_configure("MessageService",              -background => "#a000a0");
+    $text->tag_configure("List",                        -lmargin2 => "5m", -tabs => "5m");
+    $text->tag_configure("Blockquote",                  -lmargin1 => "1c", -lmargin2 => "1c");
+    $text->tag_configure("out",                         -background => "#f6fbed");
+    $text->tag_configure("Unsupported",                 -font => 'TkCaptionFont', -background => "pink");
+    $text->tag_configure("non_handled",                 -background => "red");
 }
 
 sub render_msg {
+    my $txtwidg = shift;
     #@type Telegram::MessageABC
     my $msg = shift;
 
-    $UI{txtMessage}->configure(-state => "normal");
-    $UI{txtMessage}->delete("1.0", "end");
+    $txtwidg->configure(-state => "normal");
+    $txtwidg->delete("1.0", "end");
 
     # body
-    $UI{txtMessage}->insert_end(
+    $txtwidg->insert_end(
         $msg->isa('Telegram::MessageService')
         ? (_message_action($msg->{action}), "MessageService")
         : dutf8($msg->{message})
@@ -677,7 +665,7 @@ sub render_msg {
 
     if (exists $msg->{entities}) {
         foreach (@{ $msg->{entities} }) {
-            $UI{txtMessage}->tag_add(
+            $txtwidg->tag_add(
                 ref $_,
                 "1.0+" . $_->{offset} . "chars",
                 "1.0+" . ($_->{offset} + $_->{length}) . "chars"
@@ -686,16 +674,16 @@ sub render_msg {
     }
 
     # offsets for entities are done, now we can insert to beginning
-    $UI{txtMessage}->insert("1.0", "\n");   # for headers
+    $txtwidg->insert("1.0", "\n");   # for headers
 
     # don't want for Instant View be on own message's background
-    $UI{txtMessage}->tag_add("out", "2.0", "end") if $msg->{out};
+    $txtwidg->tag_add("out", "2.0", "end") if $msg->{out};
 
     if (exists $msg->{media}) {
-        my $sep = $UI{txtMessage}->new_ttk__separator(-orient => 'horizontal');
-        $UI{txtMessage}->insert_end("\n");
-        $UI{txtMessage}->window_create("end", -window => $sep, -stretch => 1); # FIXME need more geometry
-        $UI{txtMessage}->insert_end("\n" . ref $msg->{media});
+        my $sep = $txtwidg->new_ttk__separator(-orient => 'horizontal');
+        $txtwidg->insert_end("\n");
+        $txtwidg->window_create("end", -window => $sep, -stretch => 1); # FIXME need more geometry
+        $txtwidg->insert_end("\n" . ref $msg->{media});
 
         if ($msg->{media}->isa('Telegram::MessageMediaWebPage')) {
             my $webpage = $msg->{media}->{webpage};
@@ -704,12 +692,12 @@ sub render_msg {
                 for (qw/id type hash embed_width embed_height duration 
                     url site_name display_url description embed_url embed_type author/) {
                     if (defined $webpage->{$_}) {
-                        $UI{txtMessage}->insert_end("\n$_:\t", "Telegram::TextBold");
-                        $UI{txtMessage}->insert_end(dutf8($webpage->{$_}));
+                        $txtwidg->insert_end("\n$_:\t", "::TextBold");
+                        $txtwidg->insert_end(dutf8($webpage->{$_}));
                     }
                 }
-                handle_photo($UI{txtMessage}, $webpage->{photo}) if $webpage->{photo};
-                $UI{txtMessage}->insert_end(non_handled($webpage->{document})."\n")
+                handle_photo($txtwidg, $webpage->{photo}) if $webpage->{photo};
+                $txtwidg->insert_end(non_handled($webpage->{document})."\n")
                     if $webpage->{document}; # TODO
                 if (my $iv = $webpage->{cached_page}) {
                     if ($iv->isa('Telegram::PageABC')) {
@@ -717,34 +705,34 @@ sub render_msg {
                         push @$photos, $webpage->{photo} if $webpage->{photo};
                         for my $block (@{ $iv->{blocks} }) {
                             if ($block->isa('Telegram::PageBlockABC')) {
-                                handle_pageblock($UI{txtMessage}, $block, $photos);
+                                handle_pageblock($txtwidg, $block, $photos);
                             }
                             else {
-                                $UI{txtMessage}->insert_end(non_handled($block)."\n");
+                                $txtwidg->insert_end(non_handled($block)."\n");
                             }
                         }
-                        $UI{txtMessage}->insert_end(non_handled($_)."\n")
+                        $txtwidg->insert_end(non_handled($_)."\n")
                             for @{ $iv->{documents} }; # TODO
                     }
                     else {
-                        $UI{txtMessage}->insert_end("\nhas Instant View (not handled yet) type=". ref $iv);
+                        $txtwidg->insert_end("\nhas Instant View (not handled yet) type=". ref $iv);
                     }
                 }
             }
             else {
-                $UI{txtMessage}->insert_end(non_handled($webpage) . "\n");
+                $txtwidg->insert_end(non_handled($webpage) . "\n");
             }
         }
     }
 
     if (exists $msg->{reply_markup}) {
         my $rm = $msg->{reply_markup};
-        $UI{txtMessage}->insert_end("\n" . ref $rm);
+        $txtwidg->insert_end("\n" . ref $rm);
         AE::log debug => "reply_markup " . ref $rm;
         # TODO working buttons FIXME geometry
         if ($rm->isa('Telegram::ReplyKeyboardMarkup') or $rm->isa('Telegram::ReplyInlineMarkup')) {
  #  local $Tkx::TRACE = 1;
-            my $tbl = $UI{txtMessage}->new_table(
+            my $tbl = $txtwidg->new_table(
                 -cache => 1,    # XXX not needed when widgets, but need for text
                 -rows => scalar @{ $rm->{rows} },
                 -cols => max(map { scalar @{ $_->{buttons} } } @{ $rm->{rows} }),
@@ -769,8 +757,8 @@ sub render_msg {
             }
         AE::log debug => $tbl->window_configure('0,0');
 
-            $UI{txtMessage}->insert_end("\n");
-            $UI{txtMessage}->window_create("end", -window => $tbl, -stretch => 1); # FIXME geometry
+            $txtwidg->insert_end("\n");
+            $txtwidg->window_create("end", -window => $tbl, -stretch => 1); # FIXME geometry
         }
     }
 
@@ -785,13 +773,13 @@ sub render_msg {
             my $v = $msg->{$id};
             my $hdr = { @{ $spec->[0] } }->{-text};
             $val = dutf8( ref $f eq 'CODE' ? &$f($v) : sprintf($f, $v) );
-            $UI{txtMessage}->insert("1.0", "$hdr:\t", "Telegram::TextBold", $val . "\n", '{}');
+            $txtwidg->insert("1.0", "$hdr:\t", "::TextBold", $val . "\n", '{}');
         }
     }
     my %hdrs = _get_from_to_where($msg);
     for my $hdr (qw/from to where/) {
         next if $hdr eq 'to' and not $hdrs{to_type} eq 'User';
-        $UI{txtMessage}->insert("1.0","\u$hdr:\t", "Telegram::TextBold",
+        $txtwidg->insert("1.0","\u$hdr:\t", "::TextBold",
             sprintf("%s <%s%d%s>\n",
                 $hdrs{"$hdr\_name"},
                 $hdrs{"$hdr\_type"} // '',
@@ -802,7 +790,7 @@ sub render_msg {
         );
     }
 
-    $UI{txtMessage}->configure(-state => "disabled");
+    $txtwidg->configure(-state => "disabled");
 }
 
 sub handle_photo {
@@ -826,6 +814,13 @@ sub handle_photo {
     }
 }
 
+# Instant View 2.0 is layer 88, and then:
+# * in 89: additions to pageRelatedArticle & page/url
+# * in 90: page/v2:flags.2?true
+# so we can't just rely on flag and must guess
+# ...btw, why flag needed? type structure changed incompatibly anyway :/
+my $schema_ver = ($Telegram::ObjTable::GENERATED_FROM =~ /(\d+)/)[0];
+
 sub handle_richtext {
     my ($tw, $rtext, @tags) = @_;
 
@@ -839,8 +834,34 @@ sub handle_richtext {
         handle_richtext($tw, $_, @tags) for @{ $rtext->{texts} };
         return;
     }
+    elsif ($rtext->isa('Telegram::TextImage')) {#document_id w h
+        # TODO
+        $tw->insert_end("[TextImage " . non_handled($rtext) . "]\n", 'non_handled');
+        return;
+    }
     else {
-        handle_richtext($tw, $rtext->{text}, (@tags, ref($rtext)));
+        handle_richtext($tw, $rtext->{text}, (@tags, substr(ref($rtext), length('Telegram')) ));
+    }
+}
+
+sub handle_pageblocktable {
+    my ($tw, $block) = @_;
+
+    # TODO
+     $tw->insert_end("[PageBlockTable non-handled yet ".non_handled($block)."]\n", "non_handled");
+}
+
+sub handle_pagecaption {
+    my ($tw, $block) = @_;
+    if ($block->isa('Telegram::RichTextABC')) {
+        handle_richtext($tw, $block->{caption}, 'Caption');
+    }
+    elsif ($block->isa('Telegram::PageCaptionABC')) {
+        handle_richtext($tw, $block->{text}, 'Caption');
+        handle_richtext($tw, $block->{credit}, 'Small');
+    }
+    else {
+        warn "unsupported PageCaption" . Dumper($block);
     }
 }
 
@@ -853,7 +874,7 @@ sub handle_pageblock {
     $btype =~ s/^Telegram::PageBlock//;
 
     my %actions = (
-        Unsupported => sub { $tw->insert_end("[PageBlockUnsupported]\n"); },
+        Unsupported => sub { $tw->insert_end("[PageBlockUnsupported]\n", 'Unsupported'); },
         Title       => 'text',
         Subtitle    => 'text',
         Header      => 'text',
@@ -861,6 +882,7 @@ sub handle_pageblock {
         Paragraph   => 'text',
         Preformatted=> 'text', # XXX language
         Footer      => 'text',
+        Kicker      => 'text', #XXX wtf is this?
         AuthorDate => sub {
             handle_richtext($tw, $block->{author});
             $tw->insert_end(" " . _format_time($block->{published_date}) . "\n");
@@ -876,11 +898,44 @@ sub handle_pageblock {
             AE::log info => "anchor ".$block->{name};
             $tw->mark_set("anchor".$block->{name}, "insert");
         },
-        List => sub {
-            my $i = 0;
-            for (@{ $block->{items} }) {
-                $tw->insert_end("\n".($block->{ordered} ? $i++ . ".\t" : "\x{2022}\t"));
-                handle_richtext($tw, $_, 'List');
+        List        => sub {
+            if ($schema_ver < 88) {
+                my $i = 0;
+                for (@{ $block->{items} }) {
+                    $tw->insert_end("\n".($block->{ordered} ? $i++ . ".\t" : "\x{2022}\t"));
+                    handle_richtext($tw, $_, 'List');
+                }
+            } else {    # IV 2.0 unordered list
+                for my $item (@{ $block->{items} }) {
+                    $tw->insert_end("\n\x{2022}\t", 'List');
+                    if ($item->isa('Telegram::PageListItemText')) {
+                        handle_richtext($tw, $item->{text}, 'List');
+                    }
+                    elsif ($item->isa('Telegram::PageListItemBlocks')) {
+                        # XXX TODO more indent
+                        handle_pageblock($tw, $_, $photos) for @{ $block->{blocks} };
+                    }
+                    else {
+                        warn "unknown unordered list item " . Dumper($item);
+                        $tw->insert_end("\n[unordered list item " . non_handled($block) . "]\n", 'List');
+                    }
+                }
+            }
+        },
+        OrderedList => sub {
+            for my $item (@{ $block->{items} }) {
+                $tw->insert_end("\n". $item->{num} ."\t", 'List');
+                if ($item->isa('Telegram::PageListOrderedItemText')) {
+                    handle_richtext($tw, $item->{text}, 'List');
+                }
+                elsif ($item->isa('Telegram::PageListOrderedItemBlocks')) {
+                    # XXX TODO more indent
+                    handle_pageblock($tw, $_, $photos) for @{ $block->{blocks} };
+                }
+                else {
+                    warn "unknown ordered list item " . Dumper($item);
+                    $tw->insert_end("\n[ordered list item " . non_handled($block) . "]\n", 'List');
+                }
             }
         },
         Blockquote  => sub {
@@ -894,33 +949,40 @@ sub handle_pageblock {
             handle_richtext($tw, $block->{text}, 'Pullquote');
         },
         Photo       => sub {
-            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_pagecaption($tw, $block->{caption});
             handle_photo($tw, grep { $_->{id} == $block->{photo_id} } @$photos);
         },
         Audio       => sub {
-            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_pagecaption($tw, $block->{caption});
             $tw->insert_end(" [Audio id=$block->{audio_id}]");
         },
         Video       => sub {
-            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_pagecaption($tw, $block->{caption});
             $tw->insert_end(" [Video id=$block->{video_id}]");
         },
         Cover       => sub {
             handle_pageblock($tw, $block->{cover}, $photos);
         },
         Collage     => sub {
-            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_pagecaption($tw, $block->{caption});
             $tw->insert_end("\n");
             handle_pageblock($tw, $_, $photos) for @{ $block->{items} };
         },
         Slideshow   => sub {
-            handle_richtext($tw, $block->{caption}, 'Caption');
+            handle_pagecaption($tw, $block->{caption});
             $tw->insert_end("\n");
             handle_pageblock($tw, $_, $photos) for @{ $block->{items} };
         },
         Channel     => sub {
             my $id = $block->{channel}->{id};   # TODO request (asynchronously) if not in cache
-            $tw->insert_end('@'.$tg->peer_name($id, 1), 'Telegram::TextUrl');
+            $tw->insert_end('@'.$tg->peer_name($id, 1), '::TextUrl');
+        },
+        Table       => sub { handle_pageblocktable($tw, $block) },
+        Details     => sub {
+            $tw->insert_end("\nDetails:\n");
+            handle_richtext($tw, $block->{title}, 'Title');
+            $tw->insert_end("\n");
+            handle_pageblock($tw, $_, $photos) for @{ $block->{blocks} };
         },
     );
 
@@ -1022,7 +1084,7 @@ sub handle_msg {
 
     # be able to render it later, too
     $messageStore{$parent}->{$id} = $msg;
-    render_msg($msg);   # render it, finally
+    render_msg($UI{txtMessage}, $msg);   # render it, finally
 }
 ### backend subs
 
@@ -1033,7 +1095,7 @@ sub non_handled ($) {
     no strict 'refs';
     warn "non-fields", return $ret unless keys %{"$class\::FIELDS"};
     $ret .= ":";
-    $ret .= " $_=$obj->{$_}" for keys %{"$class\::FIELDS"};
+    $ret .= " $_=$obj->{$_}" for grep { defined $obj->{$_} } keys %{"$class\::FIELDS"};
     return $ret;
 }
 
@@ -1203,28 +1265,33 @@ sub _one_cbor_rec {
     elsif (exists $obj->{in}) {
         $obj = $obj->{in};
     }
-    else {
+    elsif (exists $obj->{out}) {
         local $Data::Dumper::Indent = 0;
         render("[sent " . _format_time($_cbortime) . "] " . Dumper($obj) . "\n");
         $obj =  $obj->{out};
         # TODO use saved req_id/cb for later match in 'in'
     }
 
-    if ( $obj->isa('Telegram::UpdatesABC') ) {
-        $tg->_handle_updates($obj)
+    if (not blessed $obj) {
+        my $s;
+        $s .= " $_=".(/time/ ? _format_time($obj->{$_}) : $obj->{$_}) for sort keys %$obj;
+        render("marker record:$s\n");
+    }
+    elsif ( $obj->isa('Telegram::UpdatesABC') ) {
+        $tg->{_upd}->_do_handle_updates($obj)
     }
     elsif ( $obj->isa('MTProto::RpcResult') ) {
         my $res = $obj->{result};
 
         if ($res->isa('Telegram::Updates::DifferenceABC')) {
-            $tg->_handle_upd_diff($res)
+            $tg->{_upd}->_handle_upd_diff($res)
         }
         elsif ($res->isa('Telegram::Updates::ChannelDifferenceTooLong')
             || $res->isa('Telegram::Updates::ChannelDifference')
         ) {
             my $chan = (grep { $_->isa('Telegram::Channel') } @{$res->{chats}})[0];
             if ($chan) {
-                $tg->_handle_channel_diff($chan->{id}, $res);
+                $tg->{_upd}->_handle_channel_diff($chan->{id}, $res);
             } else {
                 AE::log warn => Dumper($obj);
             }
@@ -1279,7 +1346,7 @@ if (my $fname = $opts->replay) {
 
     no strict 'refs';
     *Telegram::invoke = sub {
-        return if caller eq 'Telegram';
+        return if caller =~ /Telegram|TeleUpd/;
         Tkx::tk___messageBox(
             -parent => $UI{mw},
             -title => "\u$0 is in offline mode!",
