@@ -5,8 +5,6 @@ my $VERSION = 0.02;
 use Modern::Perl;
 use utf8;
 
-use Encode ':all';
-use Carp;
 use Config::Tiny;
 use Storable qw(store retrieve freeze thaw dclone);
 use Getopt::Long::Descriptive;
@@ -27,7 +25,7 @@ use Telegram::ObjTable; # be independent if someone regens schema while we work
 require $_ for map { $_->{file} } values %Telegram::ObjTable::tl_type;
 
 use Data::Dumper;
-use Scalar::Util qw(reftype);
+use Teleperl::Util qw(:DEFAULT unlock_hashref_recurse);
 
 sub option_spec {
     [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
@@ -57,47 +55,13 @@ $AnyEvent::Log::FILTER->level(
 );
 $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path vs file
 
-# XXX workaround crutch of AE::log not handling utf8 & function name
-{
-    no strict 'refs';
-    no warnings 'redefine';
-    *AnyEvent::log    = *AE::log    = sub ($$;@) {
-        AnyEvent::Log::_log
-          $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-          $_[0],
-          map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
-               (@_ > 2 ? @_[2..$#_] : ())
-          );
-    };
-    *AnyEvent::logger = *AE::logger = sub ($;$) {
-        AnyEvent::Log::_logger
-          $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-          $_[0],
-          map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
-               (@_ > 2 ? @_[2..$#_] : ())
-          );
-    };
-}
+install_AE_log_crutch();
 
 my $pid = &check_exit();
 AE::log fatal => "flag exists on start with $pid contents\n" if $pid;
 
-# catch all non-our Perl's warns to log with stack trace
-# we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
-$SIG{__WARN__} = sub {
-    scalar( grep /AnyEvent|\blog/, map { (caller($_))[0..3] } (1..3) )
-        ? warn $_[0]
-        : AE::log warn => &Carp::longmess;
-};
-$SIG{__DIE__} = sub {
-    my $mess = &Carp::longmess;
-#    $mess =~ s/( at .*?\n)\1/$1/s;    # Suppress duplicate tracebacks
-    save_cbor() unless $mess =~ /CBOR|save_cbor/ms; # don't loose data if it's serv err
-    AE::log alert => $mess;
-    die $mess;
-};
+install_AE_log_SIG_WARN();
+install_AE_log_SIG_DIE();
 
 my $tg = Telegram->new(
     dc => $conf->{dc},
@@ -116,31 +80,6 @@ $tg->{after_invoke} = \&after_invoke;
 my $cbor = CBOR::XS->new->pack_strings(1);
 my $cbor_data;
 my @clones;
-
-# adapted from Hash::Util to process arrays
-sub unlock_hashref_recurse {
-    my $hash = shift;
-
-    my $htype = reftype $hash;
-    return unless defined $htype;
-    if ($htype eq 'ARRAY') {
-        foreach my $el (@$hash) {
-            unlock_hashref_recurse($el)
-                if defined reftype $el;
-        }
-        return;
-    }
-
-    foreach my $value (values %$hash) {
-        my $type = reftype($value);
-        if (defined($type) and ($type eq 'HASH' or $type eq 'ARRAY')) {
-            unlock_hashref_recurse($value);
-        }
-        Internals::SvREADONLY($value,0);
-    }
-    Hash::Util::unlock_ref_keys($hash);
-    return $hash;
-}
 
 sub one_message {
     my $mesg = shift;
@@ -204,7 +143,7 @@ sub save_cbor {
 
     $cbor_data = $CBOR::XS::MAGIC
                . $cbor->encode({    # what version decoder should use
-                       time => time,
+                       marktime => time,
                        schema => $Telegram::ObjTable::GENERATED_FROM,
                    })
                . $cbor_data
@@ -262,7 +201,8 @@ $tg->invoke(
         offset_date => 0,
         offset_id => 0,
         offset_peer => Telegram::InputPeerEmpty->new,
-        limit => -1
+        limit => -1,
+        hash => 0,
     ), \&one_message
 );
 
@@ -288,7 +228,7 @@ if ($^O ne 'MSWin32') {
     );
 }
 
-AE::log note => "entering main loop";
+AE::log note => "entering main loop on schema '$Telegram::ObjTable::GENERATED_FROM'";
 $cond->recv;
 save_cbor() if @clones;
 
