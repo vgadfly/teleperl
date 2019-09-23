@@ -69,11 +69,15 @@ use Data::Dumper;
 
 use base 'Class::Stateful';
 use fields qw( debug session instance noack last_error 
-    _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack );
+    _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack _rto _ma_pool );
 
 use constant {
-    MAX_WSZ => 16
+    MAX_WSZ => 16,
+    START_RTO => 15,
+    MA_INT => 4
 };
+
+use Time::HiRes qw/time/;
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -187,6 +191,8 @@ sub new
     $self->{_lock} = 0;
     $self->{_wsz} = 1;
     $self->{_rtt_ack} = 1;
+    $self->{_rto} = START_RTO;
+    $self->{_ma_pool} = [ (START_RTO) x MA_INT ];
     $self->{_queue} = [];
     $self->_state('init');
     
@@ -589,8 +595,9 @@ sub _real_send
         $self->_state('fatal');
         return;
     }
+    my $msgid = $message->{msg_id};
     $self->{session}{seq} += 2 unless $is_service;
-    $self->{_pending}{$message->{msg_id}} = $msg unless $is_service;
+    $self->{_pending}{$msgid} = $msg unless $is_service;
 
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
@@ -614,6 +621,8 @@ sub _real_send
         "(".ref($message->{object})."), ".
         length($packet). " bytes encrypted\n";
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
+    $msg->[3] = time;
+    $msg->[4] = AE::timer( 2*$self->{_rto}, 0, sub {$self->_handle_rto($msgid) } );
 }
 
 sub _handle_error
@@ -634,9 +643,32 @@ sub _handle_nack
     }
 }
 
+sub _handle_rto
+{
+    my ($self, $msgid) = @_;
+
+    $self->_handle_nack;
+
+    if (exists $self->{_pending}{$msgid}){
+        AE::log debug => "RTO: resending $msgid";
+        $self->send( $self->{_pending}{$msgid} );
+        delete $self->{_pending}{$msgid};
+    }
+}
+
 sub _handle_ack
 {
     my ($self, $msgid) = @_;
+
+    if (exists $self->{_pending}{$msgid}) {
+        my $last = shift @{$self->{_ma_pool}};
+        my $now = time;
+        my $pending = $self->{_pending}{$msgid}[3];
+        my $current = $now - $pending;
+        $self->{_rto} += ( $current - $last ) / MA_INT;
+        AE::log debug => "new RTO is $self->{_rto}";
+        push @{$self->{_ma_pool}}, $current;
+    }
 
     if ( --$self->{_rtt_ack} == 0 and $self->{_wsz} < MAX_WSZ ) {
         $self->{_wsz} *= 2;
