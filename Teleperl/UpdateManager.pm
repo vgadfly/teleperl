@@ -36,6 +36,8 @@ use Telegram::Updates::GetState;
 use Telegram::Updates::GetDifference;
 use Telegram::Updates::GetChannelDifference;
 
+use Telegram::InputChannel;
+
 sub new
 {
     my ($class, $session, $tg) = @_;

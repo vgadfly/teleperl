@@ -108,6 +108,7 @@ sub init {
     my $tg = Teleperl->new( storage => $stor );
 
     $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
+    $tg->reg_cb( error => sub { AE::log error => "@_"; exit 1 } );
     $tg->start;
     #$tg->update;
 
@@ -483,7 +484,8 @@ sub handle_dialogs
                     offset_date => $ds->{messages}[-1]{date},
                     offset_peer => Telegram::InputPeerEmpty->new,
                     #    offset_peer => $ipeer,
-                    limit => -1
+                    limit => -1,
+                    hash => 0
                 ),
                 sub { handle_dialogs($tg, $count, $say, @_) }
             ) if ($count < $ds->{count});
@@ -501,7 +503,8 @@ sub run
             offset_id => $offset // 0,
             offset_date => 0,
             offset_peer => Telegram::InputPeerEmpty->new,
-            limit => $limit // -1
+            limit => $limit // -1,
+            hash => 0
         ),
         sub {
             handle_dialogs(

@@ -108,5 +108,75 @@ sub invoke
     $self->{_tg}->invoke($query, $cb);
 }
 
+# XXX: compatability methods, to be deprecated
+sub peer_name
+{
+    my $self = shift;
+    $self->{_cache}->peer_name(@_);
+}
+
+sub name_to_id
+{
+    my $self = shift;
+    $self->{_cache}->name_to_id(@_);
+}
+
+sub peer_from_id
+{
+    my $self = shift;
+    $self->{_cache}->peer_from_id(@_);
+}
+
+sub input_peer
+{
+    my $self = shift;
+    $self->{_cache}->input_peer(@_);
+}
+
+sub cached_nicknames
+{
+    my $self = shift;
+    $self->{_cache}->cached_nicknames(@_);
+}
+
+sub cached_usernames
+{
+    my $self = shift;
+    $self->{_cache}->cached_usernames(@_);
+}
+
+sub send_text_message
+{
+    my ($self, %arg) = @_;
+
+    my $msg = Telegram::Messages::SendMessage->new(
+        map {
+            $arg{$_} ? ( $_ => $arg{$_} ) : ()
+        } qw(no_webpage silent background clear_draft reply_to_msg_id entities)
+    );
+    my $users = $self->{session}{users};
+    my $chats = $self->{session}{chats};
+
+    $msg->{message} = $arg{message};    # TODO check utf8
+    $msg->{random_id} = int(rand(65536));
+
+    my $peer = $self->{_cache}->peer_from_id($arg{to});
+
+    $msg->{peer} = $peer;
+
+    $self->invoke( $msg ) if defined $peer;
+}
+
+sub _cache_users
+{
+    my ($self, @users) = @_;
+    $self->{_cache}->_cache_users(@users);    
+}
+
+sub _cache_chats
+{
+    my ($self, @chats) = @_;
+    $self->{_cache}->_cache_chats(@chats);
+}
 1;
 
