@@ -214,7 +214,7 @@ sub _get_read_cb
                     # it is error
                     $_[0]->unshift_read( chunk => $len, sub {
                             my $error = $_[1];
-                            $self->_handle_error($error);
+                            $self->_handle_error(unpack("l<", $error));
                     } )
                 } else {
                     $_[0]->unshift_read( chunk => $len, sub {
@@ -618,6 +618,14 @@ sub _real_send
 
 sub _handle_error
 {
+    my ($self, $error) = @_;
+
+    $self->event( error => bless( {error_code => $error}, "MTProto::TransportError" ) );
+    $self->_state('fatal');
+}
+
+sub _handle_nack
+{
     my $self = shift;
     
     if ($self->{_wsz} > 1) {
@@ -759,8 +767,9 @@ sub _handle_encrypted
 
     AE::log trace => "recvd ". length($data) ." bytes encrypted\n";
 
+    #XXX: should be handled earlier
     if (length($data) == 4) {
-        $self->_handle_error($data);
+        $self->_handle_error(unpack("l<", $data));
     }
 
     my $authkey = substr($data, 0, 8);
