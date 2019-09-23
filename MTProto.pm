@@ -71,6 +71,10 @@ use base 'Class::Stateful';
 use fields qw( debug session instance noack last_error 
     _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack );
 
+use constant {
+    MAX_WSZ => 16
+};
+
 use AnyEvent;
 use AnyEvent::Handle;
 use AnyEvent::Socket;
@@ -511,7 +515,7 @@ sub _enqueue
     my ($self, $in_msg) = @_;
     
     AE::log debug => "EQ: pending ".scalar(keys %{$self->{_pending}}).
-        ", in q ".scalar(@{$self->{_queue}});
+        ", in q ".scalar(@{$self->{_queue}})." w=$self->{_wsz}";
     
     push @{$self->{_queue}}, $in_msg;
 }
@@ -527,7 +531,7 @@ sub _dequeue
     $self->{_lock} = 0;
 
     AE::log debug => "DQ: pending ".scalar(keys %{$self->{_pending}}).
-        ", in q ".scalar(@{$self->{_queue}});
+        ", in q ".scalar(@{$self->{_queue}})." w=$self->{_wsz}";
 
     while ( scalar(keys %{$self->{_pending}}) < $self->{_wsz} ) {
         $_ = shift @{$self->{_queue}};
@@ -612,20 +616,34 @@ sub _real_send
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
 }
 
-## low level error reporting
 sub _handle_error
 {
-    my ($self, $err) = @_;
-    die "should not happen";
-    my $error = unpack( "l<", $err );
-    $self->event( mt_error => $error );
-    $self->{last_error} = { code => $error };
-    $self->_state('fatal');
+    my $self = shift;
+    
+    if ($self->{_wsz} > 1) {
+        $self->{_wsz} /= 2;
+        $self->{_rtt_ack} = $self->{_wsz};
+    }
+}
+
+sub _handle_ack
+{
+    my ($self, $msgid) = @_;
+
+    if ( --$self->{_rtt_ack} == 0 and $self->{_wsz} < MAX_WSZ ) {
+        $self->{_wsz} *= 2;
+        $self->{_rtt_ack} = $self->{_wsz};
+    }
+    $self->{_pending}{$msgid}[1]->($msgid) if defined $self->{_pending}{$msgid}[1];
+    delete $self->{_pending}{$msgid};
+
+    $self->_dequeue;
 }
 
 sub _handle_msg
 {
     my ($self, $msg, $in_container) = @_;
+    local $_;
 
     AE::log debug => "handle_msg $msg->{seq},$msg->{msg_id}: " . ref $msg->{object};
 
@@ -672,16 +690,10 @@ sub _handle_msg
     else {
     # service msg handlers
         my $m = $msg;
-        if ($m->{object}->isa('MTProto::Pong')) {
-            delete $self->{_pending}{$m->{object}{msg_id}};
-            $self->_dequeue;
-        }
+        $self->_handle_ack( $m->{object}{msg_id} ) if $m->{object}->isa('MTProto::Pong');
+
         if ($m->{object}->isa('MTProto::MsgsAck')) {
-            for (@{$m->{object}{msg_ids}}) {
-                $self->{_pending}{$_}[1]->($_) if defined $self->{_pending}{$_}[1];
-                delete $self->{_pending}{$_};
-                $self->_dequeue;
-            }
+            $self->_handle_ack($_) for @{$m->{object}{msg_ids}};
         }
         if ($m->{object}->isa('MTProto::BadServerSalt')) {
             $self->{instance}{salt} = pack "Q<", $m->{object}{new_server_salt};
@@ -726,10 +738,7 @@ sub _handle_msg
         }
         if ($m->{object}->isa('MTProto::RpcResult')) {
             #AE::log trace => Dumper $m->{object};
-            my $id = $m->{object}{req_msg_id};
-            $self->{_pending}{$id}[1]->($id) if defined $self->{_pending}{$id}[1];
-            delete $self->{_pending}{$id};
-            $self->_dequeue;
+            $self->_handle_ack( $m->{object}{req_msg_id} );
         }
         if (($m->{seq} & 1) and not $self->{noack} and not $in_container) {
             # ack content-related messages
