@@ -735,11 +735,11 @@ sub _handle_msg
         if ($m->{object}->isa('MTProto::MsgsAck')) {
             $self->_handle_ack($_) for @{$m->{object}{msg_ids}};
         }
-        if ($m->{object}->isa('MTProto::BadServerSalt')) {
+        elsif ($m->{object}->isa('MTProto::BadServerSalt')) {
             $self->{instance}{salt} = pack "Q<", $m->{object}{new_server_salt};
             $self->_resend($m->{object}{bad_msg_id});
         }
-        if ($m->{object}->isa('MTProto::BadMsgNotification')) {
+        elsif ($m->{object}->isa('MTProto::BadMsgNotification')) {
             # sesssion not in sync: destroy and make new
             my $ecode = $m->{object}{error_code};
             my $bad_msg = $m->{object}{bad_msg_id};
@@ -776,7 +776,7 @@ sub _handle_msg
                 return;
             }
         }
-        if ($m->{object}->isa('MTProto::MsgDetailedInfoABC')) {
+        elsif ($m->{object}->isa('MTProto::MsgDetailedInfoABC')) {
             $self->event( error => bless(
                 { error_message =>"Unhandled MsgDetailedInfo" },
                 'MTProto::Error'
@@ -785,20 +785,18 @@ sub _handle_msg
             $self->_state('fatal');
             return;
         }
-        if ($m->{object}->isa('MTProto::RpcResult')) {
-            #AE::log trace => Dumper $m->{object};
-            $self->_handle_ack( $m->{object}{req_msg_id} );
-        }
-        if (($m->{seq} & 1) and not $self->{noack} and not $in_container) {
-            # ack content-related messages
-            $self->_ack($m->{msg_id});
-        }
+        else {
+            if ($m->{object}->isa('MTProto::RpcResult')) {
+                $self->_handle_ack( $m->{object}{req_msg_id} );
+            }
+            if (($m->{seq} & 1) and not $self->{noack} and not $in_container) {
+                # ack content-related messages
+                $self->_ack($m->{msg_id});
+            }
 
-        # pass msg to handler
-        # XXX: don't pass transport errors
-        $self->event( message => $m );
+            $self->event( message => $m );
+        }
     }
-
 }
 
 sub _handle_encrypted

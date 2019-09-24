@@ -43,14 +43,14 @@ use Telegram::InputPeer;
 
 use base 'Class::Stateful';
 use fields qw(
-    _mt _dc _app _proxy _timer _first _req _lock _flood_timer
-    _queue _upd reconnect session debug keepalive noupdate error force_new_session
+    _mt _dc _app _proxy _timer _first _req _lock _flood_timer _queue _upd 
+    reconnect session auth debug keepalive noupdate force_new_session
 );
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( noupdate keepalive reconnect debug force_new_session );
+    my @args = qw( noupdate keepalive reconnect debug force_new_session session auth );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     $self->SUPER::new( 
@@ -70,8 +70,6 @@ sub new
 
     @$self{@args} = @arg{@args};
 
-    my $session = $arg{session};
-    $self->{session} = $session;
     $self->{_first} = 1;
     $self->{_lock} = 1;
 
@@ -116,27 +114,12 @@ sub _mt
 {    
     my( $self, $aeh ) = @_;
 
-    # handle old mtp session
-    if ($self->{session}{mtproto}{session_id}) {
-        my $instance = {};
-        my @instance_keys = qw(auth_key auth_key_id auth_key_aux salt);
-        my $session = {};
-        my $mts = $self->{session}{mtproto};
-
-        @$instance{@instance_keys} = @$mts{@instance_keys};
-        $session->{id} = $mts->{session_id};
-        $session->{seq} = $mts->{seq};
-
-        $self->{session}{mtproto}{instance} = $instance;
-        $self->{session}{mtproto}{session} = $session;
-    }
-    
     my $force_new = $self->{force_new_session} // 0;
 
     my $mt = MTProto->new( 
             socket => $aeh, 
-            session => ( $force_new ? {} : $self->{session}{mtproto}{session} ),
-            instance => $self->{session}{mtproto}{instance}, 
+            session => ( $force_new ? {} : $self->{session} ),
+            instance => $self->{auth}, 
             debug => $self->{debug}
     );
     $self->{_mt} = $mt;
@@ -231,10 +214,12 @@ sub _handle_rpc_result
     if ($res->{result}->isa('MTProto::RpcError')) {
         $defer = $self->_handle_rpc_error($res->{result}, $req_id);
     }
-    if (defined $self->{_req}{$req_id}{cb}) {
-        &{$self->{_req}{$req_id}{cb}}( $res->{result} );
+    # FLOOD_WAIT is handled here
+    unless ($defer) {
+        $self->{_req}{$req_id}{cb}->( $res->{result} )
+            if defined $self->{_req}{$req_id}{cb};
+        delete $self->{_req}{$req_id};
     }
-    delete $self->{_req}{$req_id} unless $defer;;
 }
 
 sub _handle_rpc_error
@@ -242,10 +227,11 @@ sub _handle_rpc_error
     my ($self, $err, $req_id) = @_;
     my $defer = 0;
 
-    $self->event(error => $err);
-    $self->{error} = $err;
-
-    AE::log warn => "RPC error %s on req %d", $err->{error_message}, $req_id;
+    #$self->event(error => $err);
+    
+    AE::log warn => "RPC error %d:%s on req %d", 
+        $err->{error_code}, $err->{error_message}, $req_id;
+    
     if ($err->{error_message} eq 'USER_DEACTIVATED') {
         $self->{_timer} = undef;
         $self->event("banned");
@@ -308,6 +294,7 @@ sub _msg_cb
         if ( $msg->{object}->isa('MTProto::RpcResult') );
 
     # RpcErrors
+    # NOT HERE
     $self->_handle_rpc_error( $msg->{object} )
         if ( $msg->{object}->isa('MTProto::RpcError') );
 

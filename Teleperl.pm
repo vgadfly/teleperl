@@ -20,6 +20,9 @@ use base 'Class::Event';
 use AnyEvent;
 use Data::Dumper;
 
+use Telegram::Auth::SendCode;
+use Telegram::Auth::SignIn;
+
 sub new
 {
     my ($self, %arg) = @_;
@@ -34,7 +37,10 @@ sub new
         unless defined $arg{storage} and $arg{storage}->isa('Teleperl::Storage');
     my $storage = $arg{storage};
 
-    $self->{_tg} = Telegram->new( $storage->tg_param, $storage->tg_state, force_new_session => $new_session, keepalive => 1 );
+    $self->{_tg} = Telegram->new(
+        $storage->tg_param, force_new_session => $new_session, keepalive => 1,
+        auth => $storage->mt_auth, session => $storage->mt_session
+    );
     $self->{_upd} = Teleperl::UpdateManager->new( $new_session ? {} : $storage->upd_state );
     $self->{_cache} = Teleperl::PeerCache->new( session => $storage->peer_cache );
     $self->{_storage} = $storage;
@@ -44,8 +50,11 @@ sub new
             AE::log info => "connected";
             $self->{_upd}->sync 
     });
-    $self->{_tg}->reg_cb( error => sub { shift; $self->{_storage}->save; $self->event( error => @_ ) } );
+    $self->{_tg}->reg_cb( error => sub { shift; $self->event( error => @_ ) } );
     $self->{_tg}->reg_cb( update => sub { shift; $self->{_upd}->handle_updates(@_) } );
+
+    $self->{_tg}->reg_cb( auth => sub { $self->event('auth') } );
+    $self->{_tg}->reg_cb( banned => sub { $self->event('banned') } );
     
     $self->{_upd}->reg_cb( query => sub { shift; $self->invoke(@_) } );
     $self->{_upd}->reg_cb( cache => sub { shift; $self->{_cache}->cache(@_) } );
@@ -106,6 +115,55 @@ sub invoke
         $self->_recursive_input_access_fix($query) or return;
     }
     $self->{_tg}->invoke($query, $cb);
+}
+
+sub auth
+{
+    my ($self, %arg) = @_;
+
+    unless ($arg{code}) {
+        $self->{_phone} = $arg{phone};
+        my %param = $self->{_storage}->tg_param;
+        $self->invoke(
+            Telegram::Auth::SendCode->new( 
+                phone_number => $arg{phone},
+                api_id => $param{app}{api_id},
+                api_hash => $param{app}{api_hash},
+            ),
+            sub {
+                my $res = shift;
+                if ($res->isa('Telegram::Auth::SentCode')) {
+                    $self->{_code_hash} = $res->{phone_code_hash};
+                    my $type = ref $res->{type};
+                    $type =~ s/Telegram::Auth::SentCodeType//;
+                    $arg{cb}->(sent => $type) if defined $arg{cb};
+                }
+                elsif ($res->isa('MTProto::RpcError')) {
+                    $arg{cb}->(error => $res->{error_message}) if defined $arg{cb};
+                }
+                else {
+                    $arg{cb}->(error => 'UNKNOWN') if defined $arg{cb};
+                }
+            }
+	    );
+    }
+    else {
+        $self->invoke(
+            Telegram::Auth::SignIn->new(
+                phone_number => $self->{_phone},
+                phone_code_hash => $self->{_code_hash},
+                phone_code => $arg{code}
+            ), sub {
+                my $res = shift;
+                if ($res->isa('MTProto::RpcError')) {
+                    $arg{cb}->( error => $res->{error_message} ) if defined $arg{cb};
+                }
+                if ($res->isa('Telegram::Auth::Autorization')) {
+                    $arg{cb}->( auth => $res->{user}{id} ) if defined $arg{cb};
+                }
+            }
+        );
+    }
 }
 
 # XXX: compatability methods, to be deprecated
