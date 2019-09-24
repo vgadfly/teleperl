@@ -55,7 +55,7 @@ my $conf = Config::Tiny->read($opts->config);
 
 $Data::Dumper::Indent = 1;
 $AnyEvent::Log::FILTER->level(
-    $opts->{debug} > 0 ? "trace" :
+    $opts->debug//0 >1 ? "trace" :
         $opts->{debug} ? "debug" :
             $opts->{verbose} ? "info" : "note"
 );
@@ -63,10 +63,6 @@ $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path
 
 # XXX workaround crutch of AE::log not handling utf8 & function name
 install_AE_log_crutch();
-
-# catch all non-our Perl's warns to log with stack trace
-install_AE_log_SIG_WARN();
-install_AE_log_SIG_DIE();
 
 my $tg = Telegram->new(
     dc => $conf->{dc},
@@ -93,6 +89,10 @@ if ($opts->{theme}) {
     die $@ . "\nAvailable theme names: " . Tkx::ttk__style_theme_names() . "\n"
         if $@;
 }
+# catch all non-our Perl's warns to log with stack trace
+install_AE_log_SIG_WARN();
+install_AE_log_SIG_DIE();
+
 Tkx::option_add("*tearOff", 0); # disable detachable GTK/Motif menus
 # use available in ActivePerl's tkkit.dll packages, but not all for now
 # e.g.: json ico img::xpm - do we need these?
@@ -109,7 +109,8 @@ my $sbLimit    = 10;    # value of Limit spinbox
 my $msgToSend = '';     # text in entry
 my $curNicklistId = 0;  # id of what is selected in listbox
 my $curSelMsgId = 0;    # id of selected msg in TreeView, for MarkRead
-my $lboxNicks = '{Surprised to see nick list on right?} LOL {This is old tradition in IRC and Jabber}';
+my $lboxNicks = '{Surprised to see} {nick list on right?} {} LOL {This is old tradition} {in IRC and Jabber}';
+my $cmbxTLFunc;         # name of selected TL function
 my $logScrollEnd = 1;   # keep scrolling on adding
 my %messageStore;       # XXX refactor me!
 
@@ -136,14 +137,23 @@ $UI{sizeGrip}   = $UI{mw}->new_ttk__sizegrip;
 # parts in frames
 $UI{panw}       = $UI{mw}->new_ttk__panedwindow(-orient => 'horizontal');
 $UI{frmNicklist}= $UI{panw}->new_ttk__frame();
-$UI{frmUpdates} = $UI{panw}->new_ttk__frame();
+$UI{panControl} = $UI{panw}->new_ttk__panedwindow(-orient => 'vertical');
 $UI{panMessages}= $UI{panw}->new_ttk__panedwindow(-orient => 'vertical');
+$UI{frmUpdates} = $UI{panControl}->new_ttk__frame();
+$UI{frmInvoke}  = $UI{panControl}->new_ttk__labelframe(-text => "API raw query constructor");
 $UI{frmMsgList} = $UI{panMessages}->new_ttk__frame();
 $UI{frmMessage} = $UI{panMessages}->new_ttk__frame();
 $UI{tvMsgList}  = $UI{frmMsgList}->new_ttk__treeview(-selectmode => "browse"); # setup others later
 $UI{sbhMsgList} = $UI{frmMsgList}->new_ttk__scrollbar(-command => [$UI{tvMsgList}, "xview"], -orient => "horizontal");
 $UI{sbvMsgList} = $UI{frmMsgList}->new_ttk__scrollbar(-command => [$UI{tvMsgList}, "yview"], -orient => "vertical");
-$UI{txtUpdates} = $UI{frmUpdates}->new_tk__text(-state => "disabled", -width => 39, -height => 43, -wrap => "char");
+$UI{cmbTLFunc}  = $UI{frmInvoke}->new_ttk__combobox(-state => "readonly", -textvariable => \$cmbxTLFunc,
+    -values => [sort map { $_->{func} } grep { exists $_->{func} and not exists $_->{bang} } values %Telegram::ObjTable::tl_type]);
+$UI{trcReqArgs} = $UI{frmInvoke}->new_treectrl(-showroot => 0, -showrootbutton => 0, -showrootlines => 0);
+$UI{btReqArrAdd}= $UI{frmInvoke}->new_ttk__button(-text => "Push \@{}", -command => \&btReqArrAdd);
+$UI{btReqArrDel}= $UI{frmInvoke}->new_ttk__button(-text => "Pop \@{}",  -command => \&btReqArrDel);
+$UI{btInputPeer}= $UI{frmInvoke}->new_ttk__button(-text => "InputPeer/User", -command => \&btInputPeer);
+$UI{btInvoke}   = $UI{frmInvoke}->new_ttk__button(-text => "Invoke!", -command => \&btInvoke);
+$UI{txtUpdates} = $UI{frmUpdates}->new_tk__text(-state => "disabled", -width => 39, -height => 26, -wrap => "char");
 $UI{sbhUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "xview"], -orient => "horizontal");
 $UI{sbvUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "yview"], -orient => "vertical");
 $UI{txtMessage} = $UI{frmMessage}->new_tk__text(-state => "disabled", -width => 80, -height => 24, -wrap => "word", -font => 'TkTextFont');
@@ -151,11 +161,13 @@ $UI{sbvMessage} = $UI{frmMessage}->new_ttk__scrollbar(-command => [$UI{txtMessag
 $UI{lbNicklist} = $UI{frmNicklist}->new_tk__listbox(-listvariable => \$lboxNicks, -height => 43);
 $UI{sbhNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "xview"], -orient => "horizontal");
 $UI{sbvNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "yview"], -orient => "vertical");
-$UI{panw}->add($UI{frmUpdates}, -weight => 2);
+$UI{panw}->add($UI{panControl}, -weight => 2);
 $UI{panw}->add($UI{panMessages}, -weight => 4);
 $UI{panw}->add($UI{frmNicklist}, -weight => 3);
 $UI{panMessages}->add($UI{frmMsgList}, -weight => 4);
 $UI{panMessages}->add($UI{frmMessage}, -weight => 3);
+$UI{panControl}->add($UI{frmInvoke}, -weight => 1);
+$UI{panControl}->add($UI{frmUpdates}, -weight => 2);
 $UI{tvMsgList}->configure(-xscrollcommand => [$UI{sbhMsgList}, 'set'],  -yscrollcommand => [$UI{sbvMsgList}, 'set']);
 $UI{txtUpdates}->configure(-xscrollcommand => [$UI{sbhUpdates}, 'set'],  -yscrollcommand => [$UI{sbvUpdates}, 'set']);
 $UI{txtMessage}->configure(-yscrollcommand => [$UI{sbvMessage}, 'set']);
@@ -184,6 +196,15 @@ $UI{panw}->g_grid(       -column => 0, -row => 1, -columnspan => 8, -sticky => "
 
 $UI{lblStatus}->g_grid(  -column => 0, -row => 4, -columnspan => 8, -sticky => "nwes", -padx => 1);
 $UI{sizeGrip}->g_grid(   -column => 7, -row => 4, -sticky => "es");
+
+# inside Control pane
+# inside constructor frame
+$UI{cmbTLFunc}->g_pack(  -side => "top",  -fill => "x", -expand => "no",  -pady => 2, -padx => 2);
+$UI{trcReqArgs}->g_pack( -side => "top",  -fill => "both", -expand => "yes", -pady => 2, -padx => 2);
+$UI{btReqArrAdd}->g_pack(-side => "left", -pady => 2, -padx => 2);
+$UI{btReqArrDel}->g_pack(-side => "left", -pady => 2, -padx => 2);
+$UI{btInputPeer}->g_pack(-side => "left", -expand => "yes", -pady => 2, -padx => 2);
+$UI{btInvoke}->g_pack(  -side => "right", -pady => 2, -padx => 2);
 
 # inside Updates frame
 $UI{txtUpdates}->g_grid( -column => 0, -row => 0, -sticky => "nwes");
@@ -277,6 +298,7 @@ if (Tkx::tk_windowingsystem() eq "aqua") {
 $UI{mw}->g_bind("<Return>", \&btSendMsg);
 $UI{lbNicklist}->g_bind("<<ListboxSelect>>", \&onNicklistSelect);
 $UI{tvMsgList}->g_bind("<<TreeviewSelect>>", \&onMsgListSelect);
+$UI{cmbTLFunc}->g_bind("<<ComboboxSelected>>", \&onTLFuncSelected);
 
 # set tags for messages and their list
 $UI{tvMsgList}->tag_configure("out",            -background => "lightyellow");
@@ -302,6 +324,7 @@ our @_columns = (
 );
 setup_msglist($UI{tvMsgList});
 presetup_tags($UI{txtMessage});
+setup_treqargs($UI{trcReqArgs});
 
 ### GUI subs
 
@@ -442,6 +465,173 @@ sub about {
                     "Copymiddle 2019 vgadfly & nuclight\n" .
                     "All rights reversed.",
     );
+}
+
+### raw API request constructor treectrl
+
+## We have 3 item types:
+# 1) leaf: always builtin type, edit widgets allowed only here
+# 2) HASH: children are fields, each can have own type
+# 3) ARRAY: children are indexes, each always inherits type of parent item
+# ...but for 2 and 3, real type of child may be a choice from a small list:
+# descendants of base class (polymorphic).
+# Moreover, things are complicated by optional fields.
+# So, we must use custom item states.
+sub setup_treqargs {
+    my $trc = shift;    # tree control
+
+    # treectrl needs to setup *everything* - even most basic things!
+    # XXX so take colors from existing listbox
+    my $SystemButtonFace    = $UI{lbNicklist}->cget('-highlightbackground');
+    my $SystemHighlight     = $UI{lbNicklist}->cget('-selectbackground');
+    my $SystemHighlightText = $UI{lbNicklist}->cget('-selectforeground');
+
+    # a hack: instead of real widget, steal checkbox GIFs from demo :)
+   Tkx::image_create_photo('checked', -data => q{
+R0lGODlhDQANABEAACwAAAAADQANAIEAAAB/f3/f39////8CJ4yPNgHtLxYYtNbIbJ146jZ0gzeC
+IuhQ53NJVNpmryZqsYDnemT3BQA7
+   });
+   Tkx::image_create_photo('unchecked', -data => q{
+R0lGODlhDQANABEAACwAAAAADQANAIEAAAB/f3/f39////8CIYyPNgHtLxYYtNbIrMZTX+l9WThw
+ZAmSppqGmADHcnRaBQA7
+    });
+
+    ## custom states - for per-state element visibility options
+    # note next 3 states are named after keys in %TYPES
+    $trc->item_state_define('vector');  # ARRAY nodes - 'vector' in schema
+    $trc->item_state_define('optional');# field may be absent - to correctly draw "checkbox"
+    $trc->item_state_define('builtin'); # value is editable only for builtins
+    # our GUI states
+    $trc->item_state_define('CHECK');   # "checkbox" is set in optional
+
+    # elements
+    $trc->element_create(elemTxtName => 'text', -fill => [$SystemHighlightText => 'selected focus']);
+    $trc->element_create(elemTxtCount => 'text', -fill => 'blue');
+    $trc->element_create(elemTxtValue => 'text');
+    $trc->element_create(elemRectSel => 'rect',
+        -fill => [$SystemHighlight => 'selected focus', gray => 'selected !focus'],
+        -showfocus => 'yes');
+    $trc->element_create(elemImgCheck => 'image', -image => 'checked CHECK unchecked {}');
+    $trc->element_create(elemWidget => 'window', -destroy => 'yes');
+
+    ## styles
+
+    # for field/index - elemTxtCount element is visible if ARRAY (vector) node
+    # visual selection for element via elemRectSel (elemTxtName only) also here
+    $trc->style_create('styField');
+    $trc->style_elements(styField => [qw{elemRectSel elemTxtName elemTxtCount}]);
+    $trc->style_layout(styField => 'elemTxtName', -padx => 2, -expand => 'ns', -squeeze => 'x');
+    $trc->style_layout(styField => 'elemTxtCount', -expand => 'ns', -visible => 'yes vector no {}');
+    $trc->style_layout(styField => 'elemRectSel', -union => 'elemTxtName', -iexpand => 'ns', -ipadx => 2);
+
+    # plain text display
+    $trc->style_create('styPlain');
+    $trc->style_elements(styPlain => 'elemTxtValue');
+
+    # optional - bit number and a "checkbox"
+    $trc->style_create('styOptFlag');
+    $trc->style_elements(styOptFlag => 'elemImgCheck elemTxtValue');
+    $trc->style_layout(styOptFlag => 'elemImgCheck', -ipadx => 2, -visible => 'yes optional no {}');
+    $trc->style_layout(styOptFlag => 'elemTxtValue'); # XXX pad?
+
+    # (ab)use Tkx-provided instance state for each widget pathname
+    my $vars = $trc->_data();
+
+    # column field names as in generator, assign default item styles where possible
+    $vars->{hColumn}{name}    = $trc->column_create(-text => "Field/index", -itemstyle => 'styField');
+    $vars->{hColumn}{type}    = $trc->column_create(-text => "Type", -squeeze => "yes", -itemstyle => 'styPlain');
+    $vars->{hColumn}{optional}= $trc->column_create(-text => "?", -itemstyle => "styOptFlag", -itembackground => 'linen white');
+    $vars->{hColumn}{vector}  = $trc->column_create(-text => '@[]', -itemstyle => 'styPlain');
+    $vars->{hColumn}{value}   = $trc->column_create(-text => 'Value', -itemstyle => 'styPlain');
+
+    $trc->configure(-treecolumn => $vars->{hColumn}{name});
+
+    # allow reordering columns :)
+    $trc->header_dragconfigure(-enable => 1);
+    $trc->notify_install('<ColumnDrag-receive>');
+    $trc->notify_bind('MyTag', '<ColumnDrag-receive>', '%T column move %C %b');
+
+    # TODO other bind events, check optional
+}
+
+sub _treq_one_level {
+    my ($trc, $class, $parent) = @_;
+    my $vars = $trc->_data();
+
+    require Class::Inspector->filename($class);
+    no strict 'refs';
+    # sort as in schema XXX kludge 
+    my @fields = sort {
+            ${"$class\::FIELDS"}{$a} <=> ${"$class\::FIELDS"}{$b}
+        } keys %{"$class\::FIELDS"};
+    # TODO filter out 'flags' 
+    my %TYPES = %{"$class\::TYPES"};
+    for my $name (@fields) {
+        my $hItem = $trc->item_create(
+            $TYPES{$name}->{vector} || !$TYPES{$name}->{builtin}
+                ? (-button => "yes")
+                : ()
+        );
+        # set states according to generated type options
+        $trc->item_state_set($hItem, [map { ($TYPES{$name}->{$_} ? '' : '!').$_ } qw(vector optional builtin)]);
+        $trc->item_collapse($hItem);
+        $trc->item_element_configure(
+            $hItem, $vars->{hColumn}->{name}, 'elemTxtName',
+            -text => $name);
+        $trc->item_element_configure(
+            $hItem, $vars->{hColumn}->{type}, 'elemTxtValue',
+            -text => $TYPES{$name}->{type} =~ s/Telegram:://r);
+        $trc->item_element_configure(
+            $hItem, $vars->{hColumn}->{optional}, 'elemTxtValue',
+            -text => (split(/\./, $TYPES{$name}->{optional}))[1]) if $TYPES{$name}->{optional};
+        $trc->item_element_configure(
+            $hItem, $vars->{hColumn}->{vector}, 'elemTxtValue',
+            -text => '@') if $TYPES{$name}->{vector};
+        $trc->item_lastchild($parent => $hItem);
+
+        # populate children if possible TODO handle polymorphic
+        _treq_one_level($trc, $TYPES{$name}->{type}, $hItem) unless $TYPES{$name}->{vector} || $TYPES{$name}->{builtin};
+    }
+    # TODO
+}
+
+sub onTLFuncSelected {
+    my $tltyp = (grep { exists $_->{func} and $_->{func} eq $cmbxTLFunc }
+        values %Telegram::ObjTable::tl_type
+    )[0];
+    my $class = $tltyp->{class};
+    require $tltyp->{file};
+    my $_nargs = do { no strict 'refs'; grep(!/^flags$/, keys %{"$class\::FIELDS"})};
+
+    $UI{cmbTLFunc}->selection_clear();  # make it visually less odd
+    $UI{trcReqArgs}->g_focus();         # prevent accidental changing after select
+    $statusText="selected $class ($_nargs non-flags args) returns @{[$tltyp->{vector} ? 'vector of' : '']} $tltyp->{returns}";
+
+    # clear all
+    $UI{trcReqArgs}->item_delete($_)
+        for Tkx::SplitList($UI{trcReqArgs}->item_children("root"));
+
+    _treq_one_level($UI{trcReqArgs}, $class, "root");
+}
+
+sub btReqArrAdd {
+    # TODO
+}
+
+sub btReqArrDel {
+    # TODO
+}
+
+sub btInputPeer {
+    $statusText="No ID for listbox item", return unless $curNicklistId;
+
+    my $peer = $tg->peer_from_id($curNicklistId);
+    # TODO
+}
+
+sub btInvoke {
+    $statusText="like invoked ^)";
+    # TODO
 }
 
 ### semi-GUI subs
@@ -594,7 +784,7 @@ sub presetup_tags {
 
     # TODO font_actual (especially for subscripts/superscripts)
     # '::' correspond to generated classes, others are manual and from ::PageBlock
-    # TODO elided text for additional fileds (see comments like '#url')
+    # TODO elided text for additional fields (see comments like '#url')
 
     # usual message formatting
     $text->tag_configure('::MessageEntityMention',      -foreground => 'red', );

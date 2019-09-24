@@ -44,7 +44,7 @@ sub MainLoop () {
             $ae_idle = 1;
     });
     Tkx::after(20, \&return_to_perl_event_loop);
-    while (eval { local $Tkx::TRACE; Tkx::i::call("winfo", "exists", ".") }) {
+    while (eval { local $Tkx::TRACE; local $SIG{__DIE__}; Tkx::i::call("winfo", "exists", ".") }) {
         Tkx::i::DoOneEvent(0);
     }
 }
