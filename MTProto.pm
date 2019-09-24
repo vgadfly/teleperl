@@ -68,7 +68,7 @@ package MTProto;
 use Data::Dumper;
 
 use base 'Class::Stateful';
-use fields qw( debug session instance noack last_error 
+use fields qw( debug session instance noack _timeshift
     _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack _rto _ma_pool );
 
 use constant {
@@ -186,7 +186,8 @@ sub new
         phase_three => undef,
         session_ok => undef
     );
-    
+   
+    $self->{_timeshift} = 0;
     $self->{_tcp_first} = 1;
     $self->{_lock} = 0;
     $self->{_wsz} = 1;
@@ -241,7 +242,6 @@ sub _get_error_cb
         AE::log error => $!.':'.$msg;
         my $e = { error_message => $msg };
         $self->event( error => bless($e, 'MTProto::SocketError') );
-        $self->{last_error} = $e;
         $hdl->destroy;
         $self->_state('fatal');
     }
@@ -588,14 +588,14 @@ sub _real_send
     my ($obj, $id_cb, $is_service) = @$msg;
     my $seq = $self->{session}{seq};
     $seq += 1 unless $is_service;
-    my $message = eval { MTProto::Message->new( $seq, $obj ) };
+    my $msgid = MTProto::Message::msg_id() + $self->{_timeshift} + ($seq << 2);
+    my $message = eval { MTProto::Message->new( $seq, $obj, $msgid) };
     if ($@) {
         my $e = bless( { error_message => $@ }, 'MTProto::PackException' );
         $self->event( error =>  $e );
         $self->_state('fatal');
         return;
     }
-    my $msgid = $message->{msg_id};
     $self->{session}{seq} += 2 unless $is_service;
     $self->{_pending}{$msgid} = $msg unless $is_service;
 
@@ -750,8 +750,18 @@ sub _handle_msg
                 # 33: msg_seqno too high
                 #
                 # start new session
-                # XXX: don't start new session for service messages, i.e. acks
-                if (exists $self->{_pending}{$bad_msg}){
+                if (exists $self->{_pending}{$bad_msg}) {
+                    $self->{session}{id} = 
+                        Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+                    $self->{session}{seq} = 0;
+                    $self->_resend($bad_msg);
+                }
+            }
+            elsif ( $ecode == 16 or $ecode == 17 ) {
+                my $timeshift = ($m->{msg_id} >> 32) - ($m->{object}{bad_msg_id} >> 32);
+                AE::log warn => "clock out of sync by %d, adjusting", $timeshift;
+                $self->{_timeshift} = $timeshift * 2**32;
+                if (exists $self->{_pending}{$bad_msg}) {
                     $self->{session}{id} = 
                         Crypt::OpenSSL::Random::random_pseudo_bytes(8);
                     $self->{session}{seq} = 0;
@@ -760,7 +770,6 @@ sub _handle_msg
             }
             else {
                 # other errors, that cannot be fixed in runtime
-                # XXX: handle 16 and 17, sync clock
                 my $e = { error_code => $ecode };
                 $self->event( error => bless($e, 'MTProto::Error') );
                 $self->_state('fatal');
