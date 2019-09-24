@@ -76,7 +76,7 @@ sub key_fingerprint
     my ($n, $e) = $k->get_key_parameters;
     my $data = pack "(a4)*", map { TL::Object::pack_bytes($_->to_bin) } ($n, $e);
     my $fp = sha1( $data );
-    return unpack("Q<", substr($fp, -8));
+    return unpack("q<", substr($fp, -8));
 }
 
 for my $k (@skeys) {
