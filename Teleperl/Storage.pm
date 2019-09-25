@@ -55,7 +55,6 @@ sub save
     mkdir $self->{_dir} unless -d $self->{_dir};
 
     for my $state (qw/session auth cache update_state/) {
-        say $state, Dumper $self->{$state};
         store ( $self->{$state}, $self->{_file}{$state} ) 
             if $flags{$state} and defined $self->{$state};
     }
