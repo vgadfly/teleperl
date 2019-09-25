@@ -4,6 +4,7 @@ package Teleperl::Storage;
 
 use Config::Tiny;
 use Storable qw( store retrieve freeze thaw );
+use Data::Dumper;
 
 use constant {
     SESSION_FILE => 'session.dat',
@@ -17,11 +18,24 @@ sub new
     my ($self, %arg) = @_;
 
     $self = bless( {}, $self ) unless ref $self;
-   
-    $self->{session} = retrieve SESSION_FILE if -e SESSION_FILE;
-    $self->{auth} = retrieve AUTH_FILE if -e AUTH_FILE;
-    $self->{cache} = retrieve CACHE_FILE if -e CACHE_FILE;
-    $self->{update_state} = retrieve UPDATES_FILE if -e UPDATES_FILE;
+
+    my $prefix = $arg{dir} // '.';
+    $prefix .= '/';
+
+    $self->{_dir} = $arg{dir};
+    $self->{_file}{session} = $prefix . SESSION_FILE;
+    $self->{_file}{auth} = $prefix . AUTH_FILE;
+    $self->{_file}{cache} = $prefix . CACHE_FILE;
+    $self->{_file}{update_state} = $prefix . UPDATES_FILE;
+
+    for my $state (qw/session auth cache update_state/) {
+        if (-e $self->{_file}{$state}) {
+            $self->{$state} = retrieve $self->{_file}{$state}
+        }
+        else {
+            $self->{$state} = {}
+        }
+    }
 
     $self->{config} = Config::Tiny->read("teleperl.conf");
 
@@ -33,15 +47,18 @@ sub save
     my $self = shift;
     my %flags = @_;
 
-    my $save_session = $flags{session} // 0;
-    my $save_cache = $flags{cache} // 1;
-    my $save_auth = $flags{auth} // 1;
-    my $save_updates = $flags{updates} // 0;
+    $flags{session} = 0 unless defined $flags{session};
+    $flags{auth} = 1 unless defined $flags{auth};
+    $flags{cache} = 1 unless defined $flags{cache};
+    $flags{update_state} = 0 unless defined $flags{update_state};
 
-    store( $self->{session}, SESSION_FILE ) if $save_session;
-    store( $self->{cache}, CACHE_FILE ) if $save_cache;
-    store( $self->{update_state}, UPDATES_FILE ) if $save_updates;
-    store( $self->{auth}, AUTH_FILE ) if $save_auth;
+    mkdir $self->{_dir} unless -d $self->{_dir};
+
+    for my $state (qw/session auth cache update_state/) {
+        say $state, Dumper $self->{$state};
+        store ( $self->{$state}, $self->{_file}{$state} ) 
+            if $flags{$state} and defined $self->{$state};
+    }
 }
 
 sub tg_param
