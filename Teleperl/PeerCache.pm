@@ -77,6 +77,13 @@ sub _cache_chats
     }
 }
 
+sub self_id
+{
+    my $self = shift;
+
+    return $self->{session}{self_id};
+}
+
 sub cached_usernames
 {
     my $self = shift;

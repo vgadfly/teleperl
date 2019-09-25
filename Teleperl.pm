@@ -24,6 +24,10 @@ use Telegram::Auth::SendCode;
 use Telegram::Auth::SignIn;
 use Telegram::Auth::SignUp;
 
+use Telegram::Message;
+use Telegram::Peer;
+
+
 sub new
 {
     my ($self, %arg) = @_;
@@ -60,6 +64,7 @@ sub new
     $self->{_upd}->reg_cb( query => sub { shift; $self->invoke(@_) } );
     $self->{_upd}->reg_cb( cache => sub { shift; $self->{_cache}->cache(@_) } );
     $self->{_upd}->reg_cb( update => sub { shift; $self->_handle_update(@_) } );
+    $self->{_upd}->reg_cb( message => sub { shift; $self->_handle_message(@_) } );
 
     # translate Telegram states
     $self->{_tg}->reg_cb( state => sub { shift; $self->event( 'tg_state', @_ ) } );
@@ -76,14 +81,53 @@ sub _handle_update
 {
     my ($self, $update) = @_;
 
+    if ( $update->isa('Telegram::UpdateNewMessage') or
+         $update->isa('Telegram::UpdateNewChannelMessage')
+    ) {
+        $self->_handle_message( $update->{message} );
+    }
+    elsif ($update->isa('Telegram::UpdateShortMessage')) {
+        my $m = Telegram::Message->new;
+        local $_;
+        $m->{$_} = $update->{$_}
+            for qw/out mentioned media_unread silent id date message fwd_from via_bot_id reply_to_msg_id entities/;
+
+        if ($update->{out}) {
+            $m->{from_id} = $self->{_cache}->self_id;
+            $m->{to_id} = $update->{user_id};
+        }
+        else {
+            $m->{to_id} = Telegram::PeerUser->new(user_id => $self->{_cache}->self_id);
+            $m->{from_id} = $update->{user_id};
+        }
+        $self->_handle_message($m);
+    }
+    elsif ($update->isa('Telegram::UpdateShortChatMessage')) {
+        my $m = Telegram::Message->new;
+        local $_;
+        $m->{$_} = $update->{$_}
+            for qw/out mentioned media_unread silent id date message fwd_from via_bot_id reply_to_msg_id entities/;
+
+        $m->{from_id} = $update->{from_id};
+        $m->{to_id} = Telegram::PeerChat->new(chat_id => $update->{chat_id});
+        
+        $self->_handle_message($m);
+    }
+
     # XXX
     $self->event( update => $update );
 
     AE::log trace => "update: ". Dumper($update);
 
-    #if ( $update->isa('Telegram::Message') ) {
-    #    ...
-    #}
+}
+
+sub _handle_message
+{
+    my ($self, $mesg) = @_;
+
+    $self->event( update => $mesg );
+
+    AE::log trace => "message: ". Dumper($mesg);
 }
 
 sub _recursive_input_access_fix

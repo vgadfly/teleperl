@@ -216,7 +216,7 @@ sub _handle_update
         $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count} );
     }
 
-    if ($pts_good) {    
+    if ($pts_good) {
         $self->event( update => $upd );
     }
 }
@@ -297,7 +297,7 @@ sub _handle_upd_diff
     }
     for my $msg (@{$diff->{new_messages}}) {
         #say ref $msg;
-        $self->event( update => $msg );
+        $self->event( message => $msg );
     }
 
     $self->_unlock if $unlock;
@@ -347,7 +347,7 @@ sub _handle_channel_diff
         $self->_handle_update( $upd );
     }
     for my $msg (@{$diff->{new_messages}}) {
-        $self->event( update => $msg );
+        $self->event( message => $msg );
     }
 }
 
