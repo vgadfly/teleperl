@@ -50,15 +50,22 @@ use fields qw(
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( noupdate keepalive reconnect debug force_new_session session auth );
+    my @args = qw( noupdate keepalive reconnect force_new_session session auth );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     $self->SUPER::new( 
         init => undef,
         connecting => undef,
         connected => [ 
-            sub { $self->_dequeue; $self->event('connected') }, 
-            sub { $self->{_lock} = 1 } 
+            sub { 
+                $self->_dequeue;
+                $self->event('connected');
+                $self->{_timer} = AE::timer 0, 45, $self->_get_timer_cb;
+            }, 
+            sub { 
+                $self->{_lock} = 1; 
+                $self->{_timer} = undef;
+            } 
         ],
         idle => undef
     );
@@ -127,7 +134,7 @@ sub _mt
     $mt->reg_cb( state => sub { 
             shift; AE::log debug => "MTP state @_";
             if ($_[0] eq 'session_ok') {
-                $self->_state('connected')
+                $self->_state('connected');
             }
     } );
     $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_" } );
@@ -136,7 +143,6 @@ sub _mt
 
     $mt->start_session;
 
-    $self->{_timer} = AE::timer 0, 45, $self->_get_timer_cb;
 }
 
 sub _real_invoke
@@ -157,7 +163,7 @@ sub _real_invoke
 
 sub invoke
 {
-    my ($self, $query, $res_cb) = @_;
+    my ($self, $query, $res_cb, $service) = @_;
     my $req_id;
 
     die unless defined $query;
@@ -181,7 +187,7 @@ sub invoke
         $query = Telegram::InvokeWithLayer->new( layer => 91, query => $conn ); 
         $self->{_first} = 0;
     }
-    if ($self->{_lock}) {
+    if ($self->{_lock} and not $service) {
         $self->_enqueue( $query, $res_cb );
     }
     else {
@@ -204,13 +210,26 @@ sub _dequeue
     $self->{_lock} = 0;
 }
 
+sub flush
+{
+    my $self = shift;
+    $self->{_queue} = [];
+    $self->_state('connected');
+}
+
 sub _handle_rpc_result
 {
     my ($self, $res) = @_;
 
     my $req_id = $res->{req_msg_id};
     my $defer = 0;
-    AE::log debug => "Got result %s for $req_id", ref $res->{result} if $self->{debug};
+    AE::log debug => "Got result %s for $req_id", ref $res->{result};
+    
+    # Updates in result
+    $self->event( update => $res->{result} )
+        if ( $res->{result}->isa('Telegram::UpdatesABC') );
+
+    # Errors
     if ($res->{result}->isa('MTProto::RpcError')) {
         $defer = $self->_handle_rpc_error($res->{result}, $req_id);
     }
