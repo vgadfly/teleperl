@@ -22,6 +22,7 @@ use Data::Dumper;
 
 use Telegram::Auth::SendCode;
 use Telegram::Auth::SignIn;
+use Telegram::Auth::SignUp;
 
 sub new
 {
@@ -33,7 +34,7 @@ sub new
     my $new_session = $arg{force_new_session} // 0;
     AE::log debug => "force_new_session?=".$new_session;
 
-    croak("Teleperl::Storage required") 
+    croak("Teleperl::Storage required")
         unless defined $arg{storage} and $arg{storage}->isa('Teleperl::Storage');
     my $storage = $arg{storage};
 
@@ -48,14 +49,14 @@ sub new
     $self->{_tg}->reg_cb( new_session => sub { $self->{_upd}->sync } );
     $self->{_tg}->reg_cb( connected => sub {
             AE::log info => "connected";
-            $self->{_upd}->sync 
+            $self->{_upd}->sync
     });
     $self->{_tg}->reg_cb( error => sub { shift; $self->event( error => @_ ) } );
     $self->{_tg}->reg_cb( update => sub { shift; $self->{_upd}->handle_updates(@_) } );
 
     $self->{_tg}->reg_cb( auth => sub { $self->event('auth') } );
     $self->{_tg}->reg_cb( banned => sub { $self->event('banned') } );
-    
+
     $self->{_upd}->reg_cb( query => sub { shift; $self->invoke(@_) } );
     $self->{_upd}->reg_cb( cache => sub { shift; $self->{_cache}->cache(@_) } );
     $self->{_upd}->reg_cb( update => sub { shift; $self->_handle_update(@_) } );
@@ -95,9 +96,9 @@ sub _recursive_input_access_fix
     for (values %$obj) {
         if ($_->isa('Telegram::InputChannel') or $_->isa('Telegram::InputPeerChannel')) {
             $_->{access_hash} = $self->{_cache}->access_hash($_->{channel_id})
-        } 
+        }
         elsif ($_->isa('Telegram::InputUser') or $_->isa('Telegram::InputPeerUser')) {
-            $_->{access_hash} = $self->{_cache}->access_hash($_->{user_id}) 
+            $_->{access_hash} = $self->{_cache}->access_hash($_->{user_id})
         }
         elsif ($_->isa('TL::Object')) {
             $self->_recursive_input_access_fix($_) or return 0;
@@ -124,8 +125,8 @@ sub auth
     unless ($arg{code}) {
         $self->{_phone} = $arg{phone};
         my %param = $self->{_storage}->tg_param;
-        $self->invoke(
-            Telegram::Auth::SendCode->new( 
+        $self->{_tg}->invoke(
+            Telegram::Auth::SendCode->new(
                 phone_number => $arg{phone},
                 api_id => $param{app}{api_id},
                 api_hash => $param{app}{api_hash},
@@ -134,9 +135,10 @@ sub auth
                 my $res = shift;
                 if ($res->isa('Telegram::Auth::SentCode')) {
                     $self->{_code_hash} = $res->{phone_code_hash};
+                    $self->{_registered} = $res->{phone_registered};
                     my $type = ref $res->{type};
                     $type =~ s/Telegram::Auth::SentCodeType//;
-                    $arg{cb}->(sent => $type) if defined $arg{cb};
+                    $arg{cb}->( sent => $type, registered => $self->{_registered} ) if defined $arg{cb};
                 }
                 elsif ($res->isa('MTProto::RpcError')) {
                     $arg{cb}->(error => $res->{error_message}) if defined $arg{cb};
@@ -144,25 +146,65 @@ sub auth
                 else {
                     $arg{cb}->(error => 'UNKNOWN') if defined $arg{cb};
                 }
-            }
-	    );
+            },
+            1
+        );
     }
     else {
-        $self->invoke(
-            Telegram::Auth::SignIn->new(
-                phone_number => $self->{_phone},
-                phone_code_hash => $self->{_code_hash},
-                phone_code => $arg{code}
-            ), sub {
-                my $res = shift;
-                if ($res->isa('MTProto::RpcError')) {
-                    $arg{cb}->( error => $res->{error_message} ) if defined $arg{cb};
-                }
-                if ($res->isa('Telegram::Auth::Autorization')) {
-                    $arg{cb}->( auth => $res->{user}{id} ) if defined $arg{cb};
-                }
+        if ($self->{_registered}) {
+            $self->{_tg}->invoke(
+                Telegram::Auth::SignIn->new(
+                    phone_number => $self->{_phone},
+                    phone_code_hash => $self->{_code_hash},
+                    phone_code => $arg{code}
+                ), sub {
+                    my $res = shift;
+                        say Dumper $res;
+                    if ($res->isa('MTProto::RpcError')) {
+                        $arg{cb}->( error => $res->{error_message} ) if defined $arg{cb};
+                    }
+                    elsif ($res->isa('Telegram::Auth::Authorization')) {
+                        $arg{cb}->( auth => $res->{user}{id} ) if defined $arg{cb};
+                        $self->{_tg}->flush;
+                    }
+                    else {
+                        say Dumper $res;
+                    }
+                },
+                1
+            );
+        }
+        else {
+            my $name = $arg{first_name};
+            unless (defined $arg{first_name}) {
+                require FantasyName;
+                $name = FantasyName::generate("<s|B|Bv|v><V|s|'|V><s|V|C>");
+                $name =~ s/(\w+)/\u\L$1/;
             }
-        );
+
+            $self->{_tg}->invoke(
+                Telegram::Auth::SignUp->new(
+                    phone_number => $self->{_phone},
+                    phone_code_hash => $self->{_code_hash},
+                    phone_code => $arg{code},
+                    first_name => $name,
+                    last_name => $arg{last_name} // ""
+                ), sub {
+                    my $res = shift;
+                    if ($res->isa('MTProto::RpcError')) {
+                        $arg{cb}->( error => $res->{error_message} ) if defined $arg{cb};
+                    }
+                    elsif ($res->isa('Telegram::Auth::Authorization')) {
+                        $arg{cb}->( auth => $res->{user}{id} ) if defined $arg{cb};
+                        $self->{_tg}->flush;
+                    }
+                    else {
+                        say Dumper $res;
+                    }
+                },
+                1
+            );
+        }
     }
 }
 
@@ -228,7 +270,7 @@ sub send_text_message
 sub _cache_users
 {
     my ($self, @users) = @_;
-    $self->{_cache}->_cache_users(@users);    
+    $self->{_cache}->_cache_users(@users);
 }
 
 sub _cache_chats
