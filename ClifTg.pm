@@ -5,8 +5,6 @@ package CliTg;
 use base "CLI::Framework";
 
 use Carp;
-use Config::Tiny;
-use Storable qw( store retrieve freeze thaw );
 use Encode ':all';
 
 use AnyEvent::Impl::Perl;
@@ -21,7 +19,7 @@ use Data::Dumper;
 sub settable_opts {
     [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
     [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log'    ],
-    [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
+    [ 'session=s'   => 'name of session data save dir', { default => '.'} ],
 }
 
 sub option_spec {
@@ -37,16 +35,12 @@ sub init {
     $app->set_current_command('help') if $opts->{help};
 
     $app->cache->set( 'verbose' => $opts->{verbose} );
-    $app->cache->set( 'session' => $opts->{session} );
     $app->cache->set( 'debug'   => $opts->{debug} );
 
     # XXX do validate
     $app->cache->set('encoding' => Encode::find_encoding($opts->{encoding}))
         if $opts->{encoding};
 
-    my $session = retrieve( $opts->session ) if -e $opts->session;
-    my $conf = Config::Tiny->read($opts->config);
-    
     $Data::Dumper::Indent = 1;
     $AnyEvent::Log::FILTER->level(
         $opts->{debug} ? ($opts->{debug}>1 ? "trace" : "debug") :
@@ -104,15 +98,15 @@ sub init {
               );
         };
     }
-    my $stor = Teleperl::Storage->new;
+    my $stor = Teleperl::Storage->new( dir => $opts->{session} );
+    $app->cache->set( 'session' => $stor );
     my $tg = Teleperl->new( storage => $stor );
 
     $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
-    $tg->reg_cb( error => sub { AE::log error => "@_"; exit 1 } );
+    $tg->reg_cb( error => sub { AE::log error => "@_"; } );
     $tg->start;
     #$tg->update;
 
-    $app->cache->set( 'conf' => $conf );
     $app->cache->set( 'tg' => $tg );
     $app->cache->set( 'argobject' => [] );
 
@@ -142,6 +136,7 @@ sub command_map
     updates     => 'CliTg::Command::Updates',
     users       => 'CliTg::Command::Users',
     config      => 'CliTg::Command::Config',
+    auth        => 'CliTg::Command::Auth',
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
@@ -1174,6 +1169,57 @@ sub run
     my $tg = $self->cache->get('tg');
 
     $tg->invoke( Telegram::Help::GetConfig->new, sub { $self->get_app->render(Dumper @_) } );
+}
+
+package CliTg::Command::Auth;
+use base "CLI::Framework::Command";
+
+sub option_spec {
+    [ "mode", 'hidden' => { one_of => [
+                ["phone=i", 'phone'],
+                ["code=i", 'auth code'],
+                ["pass=s", 'auth passwd']
+            ]}
+    ],
+    ["first_name=s", "user's first name, optional"],
+    ["last_name=s", "user's last name, optional"],
+}
+
+sub run
+{
+    my ($self, $options, @args) = @_;
+    my $tg = $self->cache->get('tg');
+    
+    if (defined $options->{phone}) {
+        $tg->auth( phone => $options->{phone}, cb => sub {
+
+            my %res = @_;
+
+            if (defined $res{sent}) {
+                say 'phone '.($res{registered} ? '' : 'un').'registered';
+                say 'Code sent, type: '.$res{sent};
+            }
+            elsif (defined $res{error}) {
+                say "Error $res{error}";
+            }
+
+        } );
+    }
+
+    if (defined $options->{code}) {
+        $tg->auth( code => $options->{code}, cb => sub {
+
+            my %res = @_;
+
+            if (defined $res{auth}) {
+                say 'Success'
+            }
+            elsif (defined $res{error}) {
+                say "Error $res{error}"
+            }
+
+        } );
+    }
 }
 
 1;
