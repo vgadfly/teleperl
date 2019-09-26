@@ -27,8 +27,6 @@ use constant REQUIRED_BUILTINS_NAMES_INTERACTIVE => qw(
     menu
 );
 
-use constant ENV_PREFIX => 'PERL_CLIF_';
-
 # configure Getopt::Long to stop consuming tokens when first non-option is
 # encountered on input stream, top-level for several other funcs
 my $getopt_configuration = { getopt_conf => [qw(require_order)] }; 
@@ -617,12 +615,6 @@ sub _run_cmd_processing_loop {
         }
         # Read a command request...
         $app->read_cmd();
-        
-        my %vars;
-        while (@ARGV and $ARGV[0] =~ /=/) {
-            my @var_init = split( '=', shift @ARGV);
-            $vars{$var_init[0]} = $var_init[1];
-        }
 
         if( @ARGV ) {
             # Recognize quit requests...
@@ -633,26 +625,17 @@ sub _run_cmd_processing_loop {
             $app->_canonicalize_cmd($ARGV[0]); # translate cmd aliases
 
             if( $app->is_interactive_command($ARGV[0]) ) {
-                $app->set_env(%vars);
                 if( $app->run() ) {
                     $cmd_succeeded = 1;
                 }
-                else { 
-                    $invalid_request_count++ 
-                }
-                $app->unset_env(keys %vars);
+                else { $invalid_request_count++ }
             }
             else {
                 $app->render( 'unrecognized command request: ' . join(' ',@ARGV) . "\n");
                 $invalid_request_count++;
             }
         }
-        elsif (%vars) {
-            $app->set_env(%vars);
-        }
-        else {
-            $invalid_request_count++;
-        }
+        else { $invalid_request_count++ }
     }
 }
 
@@ -859,35 +842,6 @@ sub read_cmd {
     return 1;
 }
 
-sub _get_env_list
-{
-    my $prefix = ENV_PREFIX;
-    my @our_env = map { s/^\Q$prefix//; $_ } grep { /^\Q$prefix/ } keys %ENV;
-}
-
-sub get_env
-{
-    my @keys = _get_env_list();
-    my %env;
-    
-    @env{@keys} = @ENV{ map { ENV_PREFIX.$_ } @keys };
-    return %env;
-}
-
-sub set_env
-{
-    my ($app, %env) = @_;
-
-    @ENV{ map { ENV_PREFIX.$_ } keys %env } = values %env;
-}
-
-sub unset_env
-{
-    my $app = shift;
-
-    delete @ENV{ map { ENV_PREFIX.$_ } @_ };
-}
-
 sub _cmd_request_completions {
     my ($app) = @_;
     my $term = $app->{_readline};
@@ -920,22 +874,14 @@ sub _cmd_request_completions {
             }
         }
 
+        # short-circuit simplest case
+        if ($prefix =~ /^\s*$/) {
+            @matches = $app->get_interactive_commands();
+            return _put_lcd_of_matches($text, _filter_matches($text, @matches));
+        }
+
         my @prefixARGV = Text::ParseWords::shellwords($prefix);
         my @rawARGV = @prefixARGV;
-
-        # skip vars
-        shift @prefixARGV while (@prefixARGV && $prefixARGV[0] =~ /=/);
-
-        # short-circuit simplest case
-        unless (@prefixARGV) {
-            my @commands = $app->get_interactive_commands();
-            push @commands, map { $_.'=' } $app->_get_env_list();
-            @matches = _filter_matches($text, @commands);
-            if (scalar @matches == 1 and $matches[0] =~ /=$/) {
-                $attribs->{completion_append_character} = '';
-            }
-            return _put_lcd_of_matches($text, @matches);
-        }
 
         my ($cmd, $cmd_name, $cmd_opts, $cmd_usage);
         $app->_canonicalize_cmd($prefixARGV[0]); # translate cmd aliases
