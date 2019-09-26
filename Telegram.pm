@@ -28,6 +28,7 @@ use MTProto::Ping;
 
 # Layer and Connection
 use Telegram::InvokeWithLayer;
+use Telegram::InvokeWithoutUpdates;
 use Telegram::InitConnection;
 
 use Telegram::ChannelMessagesFilter;
@@ -185,6 +186,9 @@ sub invoke
         );
         $query = Telegram::InvokeWithLayer->new( layer => 91, query => $conn ); 
         $self->{_first} = 0;
+    }
+    elsif ( $self->{noupdate} ) {
+        $query = Telegram::InvokeWithoutUpdates->new( query => $query );
     }
     if ($self->{_lock} and not $service) {
         $self->_enqueue( $query, $res_cb );
