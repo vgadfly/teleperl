@@ -69,6 +69,10 @@ sub new
     # translate Telegram states
     $self->{_tg}->reg_cb( state => sub { shift; $self->event( 'tg_state', @_ ) } );
 
+    if ( not defined $arg{online} or $arg{online} ) {
+        my $interval = $arg{online_interval} // 60;
+        $self->{_online_timer} = AE::timer 0, $interval, sub { $self->update_status };
+    }
     return $self;
 }
 
@@ -250,6 +254,12 @@ sub auth
             );
         }
     }
+}
+
+sub update_status
+{
+    my $self = shift;
+    $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
 }
 
 # XXX: compatability methods, to be deprecated

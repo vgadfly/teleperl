@@ -28,6 +28,7 @@ sub option_spec {
     [ 'encoding=s'  => 'if your console is not in UTF-8'    ],
     [ 'noupdate!'   => 'pass noupdate to Telegram->new'     ],
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
+    [ 'offline!'    => 'dont update account status', { default => 0 } ],
 }
 
 sub init {
@@ -52,8 +53,8 @@ sub init {
     install_AE_log_crutch();
 
     my $stor = Teleperl::Storage->new( dir => $opts->{session} );
-    $app->cache->set( 'session' => $stor );
-    my $tg = Teleperl->new( storage => $stor );
+    $app->cache->set( 'storage' => $stor );
+    my $tg = Teleperl->new( storage => $stor, online => !$opts->{offline} );
 
     $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
     $tg->reg_cb( error => sub { AE::log error => "@_"; } );

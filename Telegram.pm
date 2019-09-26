@@ -336,7 +336,6 @@ sub _get_timer_cb
     return sub {
         local *__ANON__ = 'Telegram::_timer_cb';
         AE::log debug => "timer tick";
-        $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
         $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) 
             if $self->{keepalive};
     }
