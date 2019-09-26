@@ -932,6 +932,8 @@ sub _cmd_request_completions {
             }
 #print "aft=".join(':',@prefixARGV)."|ARGV=".join(':',@ARGV)."\n";
             # now $cmd is last subcmd, @prefixARGV is it's args
+            # FIXME TODO consumed opts parts missing from @prefixARGV and thus
+            # from $lastopt XXX check if fixing won't break existing code
 
             # provide data for cmd helper methods from init()
             $cmd->set_cache( $app->cache );

@@ -14,6 +14,7 @@ use AnyEvent::Log;
 use Teleperl;
 use Teleperl::Storage;
 
+use Teleperl::Util qw(:DEFAULT get_AE_log_format_cb);
 use Data::Dumper;
 
 sub settable_opts {
@@ -45,59 +46,11 @@ sub init {
     $AnyEvent::Log::FILTER->level(
         $opts->{debug} ? ($opts->{debug}>1 ? "trace" : "debug") :
             $opts->{verbose} ? "info" : "note");
-    $AnyEvent::Log::LOG->fmt_cb(sub {
-        my ($time, $ctx, $lvl, $msg) = @_;
+    $AnyEvent::Log::LOG->fmt_cb( get_AE_log_format_cb() );
 
-        my $ts = POSIX::strftime("%H:%M:%S", localtime $time)
-               . sprintf ".%04d", 1e4 * ($time - int($time));
+    install_AE_log_SIG_WARN();
+    install_AE_log_crutch();
 
-        # XXX we need just timestamp! but AE has no cb for just time..
-        # XXX so copypaste rest from AnyEvent::Log
-        my $ct = " ";
-        my @res;
-
-        for (split /\n/, sprintf "%-5s %s: %s", $AnyEvent::Log::LEVEL2STR[$_[2]], $_[1][0], $_[3]) {
-            push @res, "$ts$ct$_\n";
-            $ct = " + ";
-        }
-
-        join "", @res
-
-    });
-
-    # we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
-    $SIG{__WARN__} = sub {
-        scalar( grep /AnyEvent|log/, map { (caller($_))[0..3] } (1..4) )
-            ? warn $_[0]
-            : AE::log warn => &Carp::longmess;
-    };
-    # XXX workaround crutch of AE::log not handling utf8 & function name
-    {
-        no strict 'refs';
-        no warnings 'redefine';
-        *AnyEvent::log    = *AE::log    = sub ($$;@) {
-            AnyEvent::Log::_log
-              $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-              $_[0],
-              map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-                  ($opts->verbose
-                      ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                      : $_[1]),
-                   (@_ > 2 ? @_[2..$#_] : ())
-              );
-        };
-        *AnyEvent::logger = *AE::logger = sub ($;$) {
-            AnyEvent::Log::_logger
-              $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-              $_[0],
-              map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-                  ($opts->verbose
-                      ? (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1]
-                      : $_[1]),
-                   (@_ > 2 ? @_[2..$#_] : ())
-              );
-        };
-    }
     my $stor = Teleperl::Storage->new( dir => $opts->{session} );
     $app->cache->set( 'session' => $stor );
     my $tg = Teleperl->new( storage => $stor );
@@ -125,6 +78,7 @@ sub command_map
 {
     argobject   => 'CliTg::Command::Argobject',
     chats       => 'CliTg::Command::Chats',
+    describe    => 'CliTg::Command::Describe',
     dialogs     => 'CliTg::Command::Dialogs',
     history     => 'CliTg::Command::History',
     invoke      => 'CliTg::Command::Invoke',
@@ -140,6 +94,7 @@ sub command_map
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
+    menu    => 'CliTg::Menu',
     list    => 'CLI::Framework::Command::List',
     tree    => 'CLI::Framework::Command::Tree',
     'dump'  => 'CLI::Framework::Command::Dump',
@@ -268,6 +223,16 @@ sub report_update
             $self->render("\n$user is typing in $chat...");
         }
     }
+}
+
+package CliTg::Menu;
+use base "CLI::Framework::Command::Menu";
+
+sub menu_txt {
+    my ($self, $suppress) = @_;
+
+    return "" if $suppress;
+    return $self->SUPER::menu_txt();
 }
 
 package CliTg::Command::Message;
@@ -634,10 +599,10 @@ sub handle_history
         $opts->{limit}-- if $opts->{limit};
         if ($upd->isa('Telegram::Message')) {
             $self->get_app->render_msg($upd);
-            say Dumper $upd;
         }
     }
-    if ($ptop == 0 or $top < $ptop && $opts->{limit}) {
+    return unless $top;    # if bottom reached, slice will be empty
+    if ($ptop == 0 or $top < $ptop && ($opts->{limit} // "true")) {
         $tg->invoke( Telegram::Messages::GetHistory->new(
                 peer => $peer,
                 offset_id => $top,
@@ -773,6 +738,14 @@ sub _func2class {
     return undef;
 }
 
+sub _class2file {
+    my $cname = shift;
+    my @clst = grep { $_->{class} eq $cname } values %Telegram::ObjTable::tl_type;
+    die "must have exactly one record for '$cname' in ObjTable"
+        if @clst == 0 or @clst > 1;
+    return $clst[0]->{file};
+}
+
 sub usage_text {
     q{
     invoke --class <name> [<options>]: do raw InvokeWithLayer with this query
@@ -885,6 +858,8 @@ sub run
             $self->get_app->render(Dumper @_) 
         }
     );
+
+    return "Invoked request # $retid";
 }
 
 package CliTg::Command::Argobject;
@@ -899,6 +874,7 @@ sub usage_text {
     argobject [<opt>] pop
     argobject [<opt>] shift
     argobject [<opt>] inputpeer <self|empty|@username|@chatname|numericalid>
+    argobject [<opt>] inputuser <self|empty|@username|numericalid>
 
     OPTIONS
         --on-slot=N     do operation on sub-array in slot N instead of global
@@ -910,6 +886,7 @@ sub usage_text {
         pop             delete last element and dump it to screen
         shift           delete first element, dump it to screen and shift others
         inputPeer       as 'push' but for InputPeer only with proper completion
+        inputUser       as 'push' but for InputUser only with proper completion
 
     ARGUMENTS in subcommands
         <cname>         name of Telegram::* class to call ->new() upon
@@ -955,13 +932,15 @@ use base "CliTg::Command::Argobject";
 use Telegram::ObjTable;
 use Data::Dumper;
 
-our @cnames = map { $_->{class} } values %Telegram::ObjTable::tl_type;
+# reuse some code
+*cnames = \@CliTg::Command::Invoke::cnames;
 our $class = undef;
+*_class2file = \&CliTg::Command::Invoke::_class2file;
 
 sub option_spec {
     my @opts = ([ "class=s", "which to instantiate" ]);
     if ($class) {
-        require Class::Inspector->filename($class);
+        require(_class2file($class));
         no strict 'refs';
         push @opts, [ "$_=s", "" ] for keys %{"$class\::FIELDS"};
     }
@@ -1089,6 +1068,61 @@ sub run
     return $#$argo;
 }
 
+package CliTg::Command::Argobject::InputUser;
+use base "CliTg::Command::Argobject";
+
+use Telegram::InputUser;
+
+sub complete_arg
+{
+    my ($self, $lastopt, $argnum, $text, $attribs) = @_;
+
+    my $tg = $self->cache->get('tg');
+
+    if ($argnum == 1) {
+        return ('self', 'empty', $tg->cached_nicknames(), $tg->cached_usernames());
+    }
+
+    return undef;
+}
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "Exactly one argument describing user must be given"
+        unless @args == 1;
+
+    die "Invalid user specification"
+        unless $args[0] =~ /^(self|empty|@.+|-?[0-9]+)$/i;
+}
+
+sub run
+{
+    my ($self, $opts, $peer) = @_;
+
+    my $tg = $self->cache->get('tg');
+    my $argo = $self->cache->get('_argobjarr');
+
+    if ($peer eq 'self') {
+        $peer = Telegram::InputUserSelf->new;
+    }
+    elsif ($peer eq 'empty') {
+        $peer = Telegram::InputUserEmpty->new;
+    }
+    else {
+        $peer = $tg->name_to_id($peer);
+        $peer = $tg->peer_from_id($peer);
+    }
+    die "unknown user/chat" unless defined $peer;
+    my $user = Telegram::InputUser->new(
+        user_id     => $peer->{user_id},
+        access_hash => $peer->{access_hash},
+    );
+
+    push @$argo, $user;
+    return $#$argo;
+}
+
 package CliTg::Command::Argobject::Delete;
 use base "CliTg::Command::Argobject";
 
@@ -1154,6 +1188,143 @@ sub run {
     my $argo = $self->cache->get('_argobjarr');
     local $Data::Dumper::Indent = 1;
     return Dumper(shift @$argo);
+}
+
+package CliTg::Command::Describe;
+use base "CLI::Framework::Command";
+
+use Telegram::ObjTable;
+use MTProto::ObjTable;
+use List::Util qw(max);
+
+# reuse some code
+*cnames = \@CliTg::Command::Invoke::cnames;
+*fnames = \@CliTg::Command::Invoke::fnames;
+*_func2class = \&CliTg::Command::Invoke::_func2class;
+*_class2file = \&CliTg::Command::Invoke::_class2file;
+
+sub usage_text {
+    q{
+    describe [--func] <class-or-TL-func-name>
+
+    Display type information for Perl classes compiled from TL schema,
+    for you using `invoke` and `argobject` commands. Information is also
+    displayed on direct arguments of requested class, but not further,
+    because recursion is possible in schema (see e.g. PageBlock).
+
+    If no '--func' is specified, then any Perl generated Telegram::* or
+    MTProto::*class may be used as argument; otherwise, it must be function
+    name from schema/docs and class will be guessed from object table.
+    }
+}
+
+sub option_spec {
+    [ "func=s", "schema function/method to get class from" ],
+}
+
+sub complete_arg
+{
+    my ($self, $lastopt, $argnum, $text, $attribs, $rawARGV) = @_;
+
+    if ($argnum == 1) {
+        if ($lastopt =~ /^--func$/) {
+            return @fnames;
+        }
+        else {
+            return @cnames;
+        }
+    }
+
+    return undef;
+}
+
+sub validate
+{
+    my ($self, $opts, @args) = @_;
+    die "Telegram::* subclass or schema.funcMethodName must be specified"
+        unless $opts->func or @args;
+
+    if ($opts->func) {
+        die "unknown TL function name"
+            unless scalar grep { $_ eq $opts->func } @fnames;
+    }
+    else {
+        die "only generated MTProto/Telegram::* classes are allowed"
+            unless $args[0] =~ /^(Telegram|MTProto)::/;
+        eval { require Class::Inspector->filename($args[0]); }
+            or require(_class2file($args[0]));
+    }
+}
+
+use Data::Dumper;
+sub one_class {
+    my ($level, $class) = @_;
+    my $out;
+
+    no strict 'refs';
+    my $v;
+    if (not $level and $v = eval {
+            require Class::Inspector->filename($class);
+            ${"${class}ABC::VERSION"}
+    }) {
+        $out = "\n-> Class '$class' from '$v' schema is polymorphic, it's subclasses are:\n";
+        my $sc = Class::Inspector->subclasses($class.'ABC');
+        $out .= one_class($level+1, $_) for @$sc;
+        return $out;
+    }
+
+    $out = sprintf "\n=%s> Class:  $class  TL hash=0x%x\n", ("=" x $level), ${"$class\::hash"};
+    my $l = max (8, map { length } keys %{"$class\::TYPES"});
+    my $f = ("   " x $level) ." %-${l}s  %-9s %9s %s%s\n";
+    $out .= sprintf($f, "Name", "Opt/bit?", "Template", "Type", "");
+    for (sort keys %{"$class\::TYPES"}) {
+        my $t = ${"$class\::TYPES"}{$_};
+        $out .=  sprintf($f,
+                            $_,
+                            ($t->{optional} // ""),
+                            ($t->{vector}   ? "vector of" :
+                                $t->{bang} ? 'bang!' : ""),
+                            $t->{type},
+                            ($t->{builtin} ? " (builtin)" : ""),
+                        );
+    }
+
+    return $out;
+}
+
+sub run
+{
+    my ($self, $opts, $arg) = @_;
+
+    my $out = "Generated from '$Telegram::ObjTable::GENERATED_FROM'\n\n";
+    my @clst;
+
+    my $tl_type = (grep {
+        $opts->func
+            ? (exists $_->{func} and $_->{func} eq $opts->func)
+            : ($_->{class} eq $arg)
+    } (values %Telegram::ObjTable::tl_type, values %MTProto::ObjTable::tl_type)
+    )[0];
+
+    if ($tl_type->{func}) {
+        $out .= "TL function:  " . $tl_type->{func} . "  returns ";
+        $out .= "vector of " if $tl_type->{vector};
+        $out .= ($tl_type->{returns} // "!".$tl_type->{bang}) . "\n";
+    }
+    push @clst, $tl_type->{class};
+    eval {
+        # if polymorphic class was requested, there will be no %TYPES in it,
+        # but one_class() will handle this, so ignore $@
+        no strict 'refs';
+        require $tl_type->{file} if $opts->func;
+        push @clst, map { $_->{type} }
+                    grep { not $_->{builtin} and not $_->{bang} }
+                    values %{"$clst[0]\::TYPES"};
+    };
+
+    $out .= one_class(0, $_) for @clst;
+
+    return $out;
 }
 
 package CliTg::Command::Config;

@@ -47,6 +47,7 @@ $parser->YYData->{types} = [];
 $parser->YYData->{funcs} = [];
 
 my $prefix = shift @ARGV;
+my $srcfile = $ARGV[0];
 
 my $input;
 {
@@ -130,7 +131,7 @@ for my $type (@types) {
 
     unless ($type->{func}) {
         unless (exists $typeset{$basepkg}) {
-            print $f "package $basepkg;\n1;\n\n";
+            print $f "package $basepkg;\nour \$VERSION='$srcfile';\n\n";
             $typeset{$basepkg} = undef;
         }
     }
@@ -159,12 +160,16 @@ for my $type (@types) {
         printf $f "  %-17s => { type => ", $arg->{name};
         if (exists $builtin{$arg->{type}{name}}) {
             print $f "'" . $arg->{type}{name} . "', builtin => 1, ";
+        } elsif ($arg->{type}{bang}) {
+            print $f "'" . $arg->{type}{name} . "', ";
         } else {
-            my ($basepath, $basepkg) = pkgname($prefix, $arg->{type}{name});
+            my (undef, $basepkg) = pkgname($prefix, $arg->{type}{name});
             print $f "'$basepkg', ";
         }
         print $f "vector => 1, " if exists $arg->{type}{vector};
-        print $f "optional => '$arg->{cond}{name}', " if $arg->{cond};
+        print $f "bang => 1, " if exists $arg->{type}{bang};
+        print $f "optional => '$arg->{cond}{name}.".int(log( $arg->{cond}{bitmask})/log(2))."', "
+            if $arg->{cond};
         print $f "},\n";
     }
     print $f ");\n";
@@ -276,7 +281,7 @@ for my $type (@types) {
 
 open my $f, ">$prefix/ObjTable.pm" or die "$!";
 
-print $f "package ".$prefix."::ObjTable;\nour %tl_type = (\n";
+print $f "package ".$prefix."::ObjTable;\nour \$GENERATED_FROM='$srcfile';\nour %tl_type = (\n";
 for my $type (@types) {
     my ($path, $pkg) = pkgname($prefix, $type->{id});
     my ($basepath, $basepkg) = pkgname($prefix, $type->{type}{name});

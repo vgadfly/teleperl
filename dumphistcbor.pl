@@ -5,8 +5,7 @@ my $VERSION = 0.02;
 use Modern::Perl;
 use utf8;
 
-use Encode ':all';
-use Carp;
+use Teleperl::Util qw(:DEFAULT unlock_hashref_recurse);
 use Config::Tiny;
 use Storable qw(store retrieve freeze thaw dclone);
 use Getopt::Long::Descriptive;
@@ -19,16 +18,22 @@ eval "use Time::HiRes qw(time);";
 
 use Telegram;
 
-use Telegram::Messages::GetDialogs;
+use Telegram::ObjTable;
+
+use Telegram::Help::GetNearestDc;
 use Telegram::InputPeer;
 use Telegram::Messages::GetHistory;
+use Telegram::Users::GetFullUser;
+use Telegram::Messages::GetFullChat;
+use Telegram::Channels::GetFullChannel;
+use Telegram::Channels::GetParticipants;
+use Telegram::ChannelParticipantsFilter;
 
 use Data::Dumper;
-use Scalar::Util qw(reftype);
 
 sub option_spec {
     [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
-    [ 'noupdate!'   => 'pass noupdate to Telegram->new'                     ],
+    [ 'noupdate!'   => 'pass noupdate to Telegram->new', { default => 1 }   ],
     [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log', {default=>0}],
     [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
@@ -62,46 +67,13 @@ $AnyEvent::Log::FILTER->level(
 );
 $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path vs file
 
-# XXX workaround crutch of AE::log not handling utf8 & function name
-{
-    no strict 'refs';
-    no warnings 'redefine';
-    *AnyEvent::log    = *AE::log    = sub ($$;@) {
-        AnyEvent::Log::_log
-          $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-          $_[0],
-          map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
-               (@_ > 2 ? @_[2..$#_] : ())
-          );
-    };
-    *AnyEvent::logger = *AE::logger = sub ($;$) {
-        AnyEvent::Log::_logger
-          $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
-          $_[0],
-          map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
-               (@_ > 2 ? @_[2..$#_] : ())
-          );
-    };
-}
+install_AE_log_crutch();
 
 my $pid = &check_exit();
 die "flag exists on start with $pid contents\n" if $pid;
 
-# catch all non-our Perl's warns to log with stack trace
-# we can't just Carp::Always or Devel::Confess due to AnyEvent::Log 'warn' :(
-$SIG{__WARN__} = sub {
-    scalar( grep /AnyEvent|log/, map { (caller($_))[0..3] } (1..3) )
-        ? warn $_[0]
-        : AE::log warn => &Carp::longmess;
-};
-$SIG{__DIE__} = sub {
-    my $mess = &Carp::longmess;
-#    $mess =~ s/( at .*?\n)\1/$1/s;    # Suppress duplicate tracebacks
-    AE::log alert => $mess;
-    die $mess;
-};
+install_AE_log_SIG_WARN();
+install_AE_log_SIG_DIE();
 
 my $tg = Telegram->new(
     dc => $conf->{dc},
@@ -119,31 +91,6 @@ $tg->{after_invoke} = \&after_invoke;
 my $cbor = CBOR::XS->new->pack_strings(1);
 my $cbor_data;
 my @clones;
-
-# adapted from Hash::Util to process arrays
-sub unlock_hashref_recurse {
-    my $hash = shift;
-
-    my $htype = reftype $hash;
-    return unless defined $htype;
-    if ($htype eq 'ARRAY') {
-        foreach my $el (@$hash) {
-            unlock_hashref_recurse($el)
-                if defined reftype $el;
-        }
-        return;
-    }
-
-    foreach my $value (values %$hash) {
-        my $type = reftype($value);
-        if (defined($type) and ($type eq 'HASH' or $type eq 'ARRAY')) {
-            unlock_hashref_recurse($value);
-        }
-        Internals::SvREADONLY($value,0);
-    }
-    Hash::Util::unlock_ref_keys($hash);
-    return $hash;
-}
 
 sub one_message {
     my $mesg = shift;
@@ -202,7 +149,13 @@ sub save_cbor {
 
     my $fname = get_fname();
 
-    $cbor_data = $CBOR::XS::MAGIC . $cbor_data unless -e $fname;
+    $cbor_data = $CBOR::XS::MAGIC
+               . $cbor->encode({    # what version decoder should use
+                       time => time,
+                       schema => $Telegram::ObjTable::GENERATED_FROM,
+                   })
+               . $cbor_data
+        unless -e $fname;
 
     sysopen my $fh, $fname, AnyEvent::IO::O_CREAT | AnyEvent::IO::O_WRONLY | AnyEvent::IO::O_APPEND, 0666
         or AE::log fatal => "can't open $fname: $!";
@@ -252,12 +205,8 @@ my $cond = AnyEvent->condvar;
 
 # XXX FIXME make first request dummy 'coz error 32 possible :(
 $tg->invoke(
-    Telegram::Messages::GetDialogs->new(
-        offset_date => 0,
-        offset_id => 0,
-        offset_peer => Telegram::InputPeerEmpty->new,
-        limit => -1
-    ), sub { "noop" }
+    Telegram::Help::GetNearestDc->new,
+    sub { "noop" }
 );
 
 my $peer = $ARGV[0];
@@ -293,7 +242,7 @@ sub handle_history
                 offset_id => $top,
                 offset_date	=> $opts->{offset_date} // 0,
                 add_offset	=> $opts->{add_offset} // 0,
-                limit	=> $opts->{limit}  || 10,
+                limit	=> $opts->{limit}  || 20,
                 max_id	=> $opts->{max_id} || 0,
                 min_id	=> $opts->{min_id} || 0,
                 hash => 0
@@ -304,23 +253,104 @@ sub handle_history
     }
 }
 
+sub handle_chanparticipants {
+    my ($reply, $offset) = @_;
+
+    one_message($_[0]);
+
+    unless ($reply->isa('Telegram::Channels::ChannelParticipants')) {
+        AE::log warn => "not a Telegram::Channels::ChannelParticipants" . Dumper($reply);
+        return;
+    }
+    AE::log debug => "offset=%d count=%d", $offset, $reply->{count};
+
+    $offset += 20;  # XXX hardcode
+    return if $offset > $reply->{count};
+
+    $tg->invoke(
+        Telegram::Channels::GetParticipants->new(
+            channel => $peer,
+            filter  => Telegram::ChannelParticipantsRecent->new(),
+            offset  => $offset,
+            limit   => 0,
+            hash    => 0,
+
+        ),
+        sub {
+            handle_chanparticipants($_[0], $offset);
+        }
+    );
+}
+
+# save info about peer in addition to history
+sub mainreqs {
+    if ($peer->isa('Telegram::InputPeerUser')) {
+        # users.getFullUser
+        $tg->invoke(
+            Telegram::Users::GetFullUser->new(
+                id  => $peer,
+            ),
+            \&one_message,
+        );
+    }
+    elsif ($peer->isa('Telegram::InputPeerChat')) {
+        # messages.getFullChat
+        $tg->invoke(
+            Telegram::Messages::GetFullChat->new(
+                chat_id => $peer->{chat_id},
+            ),
+            sub {
+                # TODO do request Telegram::UserFull for each?
+                one_message($_[0]);
+            }
+        );
+
+    }
+    elsif ($peer->isa('Telegram::InputPeerChannel')) {
+        # channels.getFullChannel
+        $tg->invoke(
+            Telegram::Channels::GetFullChannel->new(
+                channel => $peer,
+            ),
+            \&one_message,
+        );
+        # channels.getParticipants
+        $tg->invoke(
+            Telegram::Channels::GetParticipants->new(
+                channel => $peer,
+                filter  => Telegram::ChannelParticipantsRecent->new(),
+                offset  => 0,   # XXX ?
+                limit   => 0,
+                hash    => 0,
+
+            ),
+            sub {
+                handle_chanparticipants($_[0], 0);
+            }
+        );
+    }
+
+    # then, history itself
+    $tg->invoke(
+        Telegram::Messages::GetHistory->new(
+            peer => $peer,
+            offset_id	=> $opts->{offset_id} // 0,
+            offset_date	=> $opts->{offset_date} // 0,
+            add_offset	=> $opts->{add_offset} // 0,
+            limit	=> $opts->{limit} // 20,
+            max_id	=> $opts->{max_id} // 0,
+            min_id	=> $opts->{min_id} // 0,
+            hash => 0
+        ), sub {
+            handle_history($peer, $_[0], 0, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
+        }
+    );
+}
+
+# give a time for possible MTProto sync errors...
 my $req = AnyEvent->timer(
     after => 3,
-    cb => sub {
-        $tg->invoke( Telegram::Messages::GetHistory->new(
-                peer => $peer,
-                offset_id	=> $opts->{offset_id} // 0,
-                offset_date	=> $opts->{offset_date} // 0,
-                add_offset	=> $opts->{add_offset} // 0,
-                limit	=> $opts->{limit} // 10,
-                max_id	=> $opts->{max_id} // 0,
-                min_id	=> $opts->{min_id} // 0,
-                hash => 0
-            ), sub {
-                handle_history($peer, $_[0], 0, $opts) if $_[0]->isa('Telegram::Messages::MessagesABC');
-
-        } );
-    }
+    cb => \&mainreqs,
 );
 
 my $save_i = 1;
