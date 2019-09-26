@@ -68,8 +68,10 @@ package MTProto;
 use Data::Dumper;
 
 use base 'Class::Stateful';
-use fields qw( debug session instance noack _timeshift
-    _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack _rtt _ma_pool );
+use fields qw( 
+    session instance noack _timeshift
+    _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack _rtt _ma_pool 
+);
 
 use constant {
     MAX_WSZ => 16,
@@ -175,7 +177,7 @@ sub gen_aes_key
 
 sub new
 {
-    my @args = qw(instance session debug noack);
+    my @args = qw(instance session noack);
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
@@ -703,7 +705,7 @@ sub _handle_msg
     # unpack msg containers
     my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
     if ($objid == 0x73f1f8dc) {
-        AE::log debug => "Container\n" if $self->{debug};
+        AE::log trace => "Container\n";
 
         my $data = $msg->{data};
         my $msg_count = unpack( "L<", substr($data, 4, 4) );
@@ -724,7 +726,7 @@ sub _handle_msg
     }
     # gzip
     elsif ($objid == 0x3072cfa1) {
-        AE::log debug => "gzip\n" if $self->{debug};
+        AE::log trace => "gzip\n";
         
         my @stream = unpack "(a4)*", substr($msg->{data}, 4);
         my $zdata = TL::Object::unpack_string(\@stream);

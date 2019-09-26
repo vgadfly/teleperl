@@ -44,7 +44,7 @@ use Telegram::InputPeer;
 use base 'Class::Stateful';
 use fields qw(
     _mt _dc _app _proxy _timer _first _req _lock _flood_timer _queue _upd 
-    reconnect session auth debug keepalive noupdate force_new_session
+    reconnect session auth keepalive noupdate force_new_session
 );
 
 # args: DC, proxy and stuff
@@ -127,7 +127,6 @@ sub _mt
             socket => $aeh, 
             session => ( $force_new ? {} : $self->{session} ),
             instance => $self->{auth}, 
-            debug => $self->{debug}
     );
     $self->{_mt} = $mt;
     
@@ -168,7 +167,7 @@ sub invoke
 
     die unless defined $query;
     AE::log info => "invoke: " . ref $query;
-    AE::log trace => Dumper $query if $self->{debug};
+    AE::log trace => Dumper $query;
     if ($self->{_first}) {
         AE::log debug => "first, using wrapper";
         my $inner = $query;
@@ -306,7 +305,7 @@ sub _msg_cb
     my $self = shift;
     my $msg = shift;
     AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
-    AE::log trace => Dumper $msg->{object} if $self->{debug};
+    AE::log trace => Dumper $msg->{object};
 
     # RpcResults
     $self->_handle_rpc_result( $msg->{object} )
