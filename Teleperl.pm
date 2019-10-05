@@ -97,11 +97,11 @@ sub _handle_update
             for qw/out mentioned media_unread silent id date message fwd_from via_bot_id reply_to_msg_id entities/;
 
         if ($update->{out}) {
+            $m->{to_id} = Telegram::PeerUser->new( user_id => $update->{user_id} );
             $m->{from_id} = $self->{_cache}->self_id;
-            $m->{to_id} = $update->{user_id};
         }
         else {
-            $m->{to_id} = Telegram::PeerUser->new(user_id => $self->{_cache}->self_id);
+            $m->{to_id} = Telegram::PeerUser->new( user_id => $self->{_cache}->self_id );
             $m->{from_id} = $update->{user_id};
         }
         $self->_handle_message($m);

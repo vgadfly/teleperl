@@ -127,7 +127,7 @@ sub _mt
     my $mt = MTProto->new( 
             socket => $aeh, 
             session => ( $force_new ? {} : $self->{session} ),
-            instance => $self->{auth}, 
+            keys => $self->{auth}, 
     );
     $self->{_mt} = $mt;
     
