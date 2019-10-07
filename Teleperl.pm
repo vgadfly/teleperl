@@ -20,6 +20,8 @@ use base 'Class::Event';
 use AnyEvent;
 use Data::Dumper;
 
+use Telegram::GetConfig;
+
 use Telegram::Auth::SendCode;
 use Telegram::Auth::SignIn;
 use Telegram::Auth::SignUp;
@@ -37,10 +39,12 @@ sub new
 
     my $new_session = $arg{force_new_session} // 0;
     AE::log debug => "force_new_session?=".$new_session;
+    $self->{_force_new_session} = $new_session;
 
     croak("Teleperl::Storage required")
         unless defined $arg{storage} and $arg{storage}->isa('Teleperl::Storage');
     my $storage = $arg{storage};
+    $self->{_storage} = $storage;
 
     $self->{_tg} = Telegram->new(
         $storage->tg_param, force_new_session => $new_session, keepalive => 1,
@@ -78,7 +82,55 @@ sub new
 
 sub start
 {
-    shift->{_tg}->start;
+    my $self = shift;
+    $self->{_tg}->start;
+    my $guarg = $self->{_tg}->reg_cb( connected => sub {
+            # get config once
+            $self->{_tg}->unreg_cb($guard);
+            $self->{_tg}->invoke(Telegram::GetConfig->new, sub {
+                    my $config = shift;
+                    $self->{_config} = $config if $config->isa('Telegram::Config');
+                }
+            );
+        }
+    );
+}
+
+sub _migrate
+{
+    my ($self, $dc) = @_;
+    return unless defined $self->{_config};
+    
+    my @options = grep { $_->{id} == $dc } @{$self->{_config}{dc_options}};
+    my %param = $self->{_storage}->tg_param;
+
+    if (defined $param{proxy}) {
+        @options = grep { defined $->{static} } @options;
+    }
+    return unless @options;
+
+    undef $self->{_tg};
+    # XXX: maybe try different ones
+    $param{dc}{addr} = $options[0]{ip_address};
+    $param{dc}{port} = $options[0]{port};
+
+    $self->{_tg} = Telegram->new(
+        $storage->tg_param, force_new_session => $new_session, keepalive => 1,
+        auth => $storage->mt_auth, session => $storage->mt_session
+    );
+    
+    $self->{_tg}->reg_cb( new_session => sub { $self->{_upd}->sync } );
+    $self->{_tg}->reg_cb( connected => sub {
+            AE::log info => "connected";
+            $self->{_upd}->sync
+    });
+    $self->{_tg}->reg_cb( error => sub { shift; $self->event( error => @_ ) } );
+    $self->{_tg}->reg_cb( update => sub { shift; $self->{_upd}->handle_updates(@_) } );
+
+    $self->{_tg}->reg_cb( auth => sub { $self->event('auth') } );
+    $self->{_tg}->reg_cb( banned => sub { $self->event('banned') } );
+
+    $self->{_tg}->start;
 }
 
 sub _handle_update
@@ -189,6 +241,12 @@ sub auth
                     $arg{cb}->( sent => $type, registered => $self->{_registered} ) if defined $arg{cb};
                 }
                 elsif ($res->isa('MTProto::RpcError')) {
+                    if ($res->{error_code} == 303 ) {
+                        # migrate
+                        my $dc = $res->{error_message};
+                        $dc =~ s/^.*_MIGRATE_//;
+                        $self->_migrate($dc);
+                    }
                     $arg{cb}->(error => $res->{error_message}) if defined $arg{cb};
                 }
                 else {
@@ -260,6 +318,13 @@ sub update_status
 {
     my $self = shift;
     $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
+}
+
+sub fetch_file
+{
+    my ($self, $dst, %file) = @_;
+
+    
 }
 
 # XXX: compatability methods, to be deprecated
