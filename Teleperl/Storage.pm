@@ -11,6 +11,7 @@ use constant {
     AUTH_FILE => 'auth.dat',
     CACHE_FILE => 'cache.dat',
     UPDATES_FILE => 'upd.dat',
+    TCONF_FILE => 'tconf.dat',
 };
 
 sub new
@@ -26,9 +27,10 @@ sub new
     $self->{_file}{session} = $prefix . SESSION_FILE;
     $self->{_file}{auth} = $prefix . AUTH_FILE;
     $self->{_file}{cache} = $prefix . CACHE_FILE;
+    $self->{_file}{tconf} = $prefix . TCONF_FILE;
     $self->{_file}{update_state} = $prefix . UPDATES_FILE;
 
-    for my $state (qw/session auth cache update_state/) {
+    for my $state (qw/session auth cache update_state tconf/) {
         if (-e $self->{_file}{$state}) {
             $self->{$state} = retrieve $self->{_file}{$state}
         }
@@ -50,11 +52,12 @@ sub save
     $flags{session} = 0 unless defined $flags{session};
     $flags{auth} = 1 unless defined $flags{auth};
     $flags{cache} = 1 unless defined $flags{cache};
+    $flags{tconf} = 1 unless defined $flags{tconf};
     $flags{update_state} = 0 unless defined $flags{update_state};
 
     mkdir $self->{_dir} unless -d $self->{_dir};
 
-    for my $state (qw/session auth cache update_state/) {
+    for my $state (qw/session auth cache update_state tconf/) {
         store ( $self->{$state}, $self->{_file}{$state} ) 
             if $flags{$state} and defined $self->{$state};
     }
@@ -83,6 +86,11 @@ sub upd_state
 sub peer_cache
 {
     shift->{cache}
+}
+
+sub config
+{
+    shift->{tconf}
 }
 
 1;
