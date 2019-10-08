@@ -273,7 +273,7 @@ sub start_session
 
     $self->_state('phase_one');
 
-    AE::log debug => "starting new session\n" if $self->{debug};
+    AE::log debug => "starting new session\n";
 
 
 #
@@ -309,7 +309,7 @@ sub _phase_one
     return $self->_fatal('no ResPQ on phase one') 
         unless $res_pq->isa("MTProto::ResPQ");
 
-    AE::log debug => "got ResPQ\n" if $self->{debug};
+    AE::log debug => "got ResPQ\n";
 
     my $pq = unpack "Q>", $res_pq->{pq};
     my @pq = factor($pq);
@@ -397,7 +397,7 @@ sub _phase_two
     $self->_fatal('bad DHInnerData: '.ref $dh_inner) 
         unless $dh_inner->isa('MTProto::ServerDHInnerData');
     
-    AE::log debug => "got ServerDHInnerData\n" if $self->{debug};
+    AE::log debug => "got ServerDHInnerData\n";
 
     return $self->_fatal("bad nonce") unless $dh_inner->{nonce}->equals( $nonce );
     return $self->_fatal("bad server_nonce") 
@@ -569,7 +569,7 @@ sub send
     
     # check if session is ready
     unless ($self->{_state} eq 'session_ok') {
-        AE::log debug => "session not ready, queueing\n" if $self->{debug};
+        AE::log debug => "session not ready, queueing\n";
         $self->_enqueue($_) for @msg;
         return;
     }
@@ -736,8 +736,6 @@ sub _handle_msg
         @stream = unpack "(a4)*", $objdata;
         my $ret = TL::Object::unpack_obj(\@stream);
         
-        #print "inflated: ", unpack ("H*", $objdata), "\n" if $self->{debug};
-        #print ref $ret if defined $ret;
         $msg->{data} = $objdata;
         $msg->{object} = $ret;
         $self->_handle_msg( $msg, $in_container ) if defined $ret;
