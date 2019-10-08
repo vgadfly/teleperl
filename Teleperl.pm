@@ -25,10 +25,14 @@ use Telegram::Help::GetConfig;
 use Telegram::Auth::SendCode;
 use Telegram::Auth::SignIn;
 use Telegram::Auth::SignUp;
+use Telegram::Auth::ExportAuthorization;
+use Telegram::Auth::ImportAuthorization;
 
 use Telegram::Message;
 use Telegram::Peer;
 
+use Telegram::InputFileLocation;
+use Telegram::Upload::GetFile;
 
 sub new
 {
@@ -63,6 +67,9 @@ sub new
         my $interval = $arg{online_interval} // 60;
         $self->{_online_timer} = AE::timer 0, $interval, sub { $self->update_status };
     }
+
+    $self->{_file_part_size} = 2 ** 19;
+    $self->{autofetch} = $arg{autofetch} // 0;
     return $self;
 }
 
@@ -70,6 +77,7 @@ sub start
 {
     my $self = shift;
     $self->{_tg}->start;
+    
     my $guard;
     $guard = $self->{_tg}->reg_cb( connected => sub {
             # get config once
@@ -210,6 +218,47 @@ sub _handle_message
 
     $self->event( update => $mesg );
 
+    if ( $self->{autofetch} and defined $mesg->{media} ) {
+        if ( $mesg->{media}->isa('Telegram::MessageMediaDocument') ) {
+            my $doc = $mesg->{media}{document};
+            my $filename = $self->{_storage}{files};
+            $filename .= $doc->{dc_id} .'_'. $doc->{id};
+
+            $self->fetch_file(
+                dst => $filename,
+                type => 'doc',
+                dc => $doc->{dc_id},
+                id => $doc->{id},
+                reference => $doc->{file_reference},
+                access_hash => $doc->{access_hash},
+                cb => sub {
+                    $self->event( 'fetch', msg_id => $mesg->{id}, name => $filename, @_ )
+                }
+            );
+        }
+        elsif ( $mesg->{media}->isa('Telegram::MessageMediaPhoto') ) {
+            my $photo = $mesg->{media}{photo};
+            for my $sz ( @{$photo->{sizes}} ) {
+                my $filename = $self->{_storage}{files};
+                $filename .= $self->{_config}{home_dc} .'_'. $photo->{id};
+                $filename .= '_'. $sz->{w} .'x'. $sz->{h};
+                
+                $self->fetch_file(
+                    dst => $filename,
+                    type => 'file',
+                    dc => $sz->{location}{dc_id},
+                    volume_id => $sz->{location}{volume_id},
+                    local_id => $sz->{location}{local_id},
+                    secret => $sz->{location}{secret},
+                    reference => $sz->{location}{file_reference},
+                    access_hash => $photo->{access_hash},
+                    cb => sub {
+                        $self->event( 'fetch', msg_id => $mesg->{id}, name => $filename, @_ )
+                    }
+                );
+            }
+        }
+    }
     AE::log trace => "message: ". Dumper($mesg);
 }
 
@@ -343,9 +392,96 @@ sub update_status
 
 sub fetch_file
 {
-    my ($self, $dst, %file) = @_;
+    my ($self, %file) = @_;
 
+    my $roam = $self->_spawn_tg( $file{dc}, 0 );
+    $roam->start;
+
+    if ( $file{dc} != $self->{_config}{home_dc} ) {
+        $self->{_tg}->invoke( 
+            Telegram::Auth::ExportAuthorization->new( dc_id => $file{dc} ),
+            sub {
+                my $auth = shift;
+                if ( $auth->isa('MTProto::RpcError') ) {
+                    $file{cb}->( error => $auth->{error_message} );
+                }
+                else {
+                    $roam->invoke(
+                        Telegram::Auth::ImportAuthorization->new(
+                            id => $auth->{id},
+                            bytes => $auth->{bytes}
+                        ),
+                        sub {
+                            $self->_fetch_file( $roam, %file );
+                        }
+                    );
+                }
+            }
+        );
+    } else {
+        $self->_fetch_file( $roam, %file );
+    }
+}
+
+sub _fetch_file
+{
+    my ($self, $tg, %file) = @_;
     
+    my $loc;
+    # L91 types (to be deprecated)
+    if ( $file{type} eq 'doc' ) 
+    {
+        $loc = Telegram::InputDocumentFileLocation->new(
+            id => $file{id},
+            access_hash => $file{access_hash},
+            file_reference => $file{reference}
+        );
+    }
+    elsif ( $file{type} eq 'file' ) {
+        $loc = Telegram::InputFileLocation->new(
+            volume_id => $file{volume_id},
+            local_id => $file{local_id},
+            secret => $file{secret},
+            file_reference => $file{reference}
+        );
+    } 
+    else {
+        $file{cb}->( error => "unknown type $file{type}" ) 
+            if defined $file{cb};
+        return;
+    }
+    my $file;
+    open( $file, '>', $file{dst} );
+    $self->_fetch_file_part( $file, $tg, $loc, 0, 0, $file{cb} );
+}
+
+sub _fetch_file_part
+{
+    my ($self, $file, $tg, $loc, $part, $size, $cb) = @_;
+    
+    $tg->invoke(
+        Telegram::Upload::GetFile->new(
+            location => $loc,
+            offset => $part * $self->{_file_part_size},
+            limit => $self->{_file_part_size}
+        ),
+        sub {
+            if ($_[0]->isa('MTProto::RpcError')) {
+                return $cb->( error => $_[0]->{error_message} )
+                    if defined $cb;
+            }
+            print $file $_[0]->{bytes};
+            my $part_size = length( $_[0]->{bytes} );
+            $size += $part_size;
+            if ( $part_size == $self->{_file_part_size}) {
+                return $self->_fetch_file_part( $tg, $part+1, $size, $cb );
+            }
+            else {
+                close $file;
+                return $cb->( size => $size ) if defined $cb;
+            }
+        }
+    ); 
 }
 
 # XXX: compatability methods, to be deprecated

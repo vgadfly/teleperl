@@ -54,9 +54,20 @@ sub init {
 
     my $stor = Teleperl::Storage->new( dir => $opts->{session} );
     $app->cache->set( 'storage' => $stor );
-    my $tg = Teleperl->new( storage => $stor, online => !$opts->{offline} );
+    my $tg = Teleperl->new( storage => $stor, online => !$opts->{offline}, autofetch => 1 );
 
     $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
+    $tg->reg_cb( fetch => sub { 
+            shift;
+            my %res = @_;
+            if ( defined $res{error} ) {
+                $app->render( "file fetch failed with error: $res{error}\n" );
+            }
+            else {
+                $app->render( "file $res{name}, size $res{size} fetched\n");
+            }
+        }
+    );
     $tg->reg_cb( error => sub { AE::log error => "@_"; } );
     $tg->start;
     #$tg->update;

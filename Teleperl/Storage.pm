@@ -39,6 +39,10 @@ sub new
         }
     }
 
+    $self->{files} = $prefix . ( $arg{files} // 'file_cache/' );
+    if ( $self->{files} =~ m@/$@ ) {
+        mkdir $self->{files} unless -d $self->{files}
+    }
     $self->{config} = Config::Tiny->read("teleperl.conf");
 
     return $self;
