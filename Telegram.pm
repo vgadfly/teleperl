@@ -281,6 +281,13 @@ sub _handle_rpc_error
                 $self->_state('connected');
         });
     }
+    if ( $err->{error_code} == 303 and not $err->{error_message} =~ /^FILE_/ ) {
+        # migrate
+        my $dc = $err->{error_message};
+        $dc =~ s/^.*_MIGRATE_//;
+        $defer = 1;
+        $self->event(migrate => $dc, $self->{_req}{$req_id});
+    }
     return $defer;
 }
 
