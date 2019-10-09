@@ -626,7 +626,7 @@ sub _real_send
     $msg->[3] = time;
     # XXX
     AnyEvent->now_update;
-    $msg->[4] = AE::timer( $self->{_rtt} * 2, $self->{_rtt} * 2, sub {
+    $msg->[4] = AE::timer( $self->{_rtt} * 4, $self->{_rtt} * 2, sub {
             $self->_handle_rto($msgid) 
         } );
 }

@@ -166,7 +166,7 @@ sub invoke
     my ($self, $query, $res_cb, $service) = @_;
     my $req_id;
 
-    die unless defined $query;
+    Carp::confess unless defined $query;
     AE::log info => "invoke: " . ref $query;
     AE::log trace => Dumper $query;
     if ($self->{_first}) {

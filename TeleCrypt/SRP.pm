@@ -4,20 +4,8 @@ use Crypt::OpenSSL::Bignum;
 use Crypt::OpenSSL::RSA;
 use Crypt::OpenSSL::Random;
 use Crypt::OpenSSL::AES;
-use Digest::SHA qw(sha1 sha256 sha512);
-
-
-sub pbkdf2
-{
-    my ($pass, $salt, $hash, $iter, $len) = @_;
-
-    my $tmp = $pass . $salt;
-    while ($iter--) {
-        $tmp = $hash->($tmp);
-    }
-    $tmp = substr($tmp, 0, $len) if defined $len;
-    return $tmp;
-}
+use Digest::SHA qw(sha256 hmac_sha512);
+use PBKDF2::Tiny qw(derive);
 
 sub tg_sh
 {
@@ -34,41 +22,59 @@ sub tg_ph1
 sub tg_ph2
 {
     my ($pass, $salt1, $salt2) = @_;
-    return tg_sh( pbkdf2( tg_ph1( $pass, $salt1, $salt2 ), $salt1, \&sha512, 100000) );
+
+    my $pass = tg_ph1( $pass, $salt1, $salt2 );
+    my $dk = derive( 'SHA-512', $pass, $salt1, 100000 );
+    return tg_sh( $dk, $salt2 );
+}
+
+# bignum to 256 byte binary
+sub bn2bin
+{
+    my $bn = shift;
+    my $len = $bn->num_bytes;
+    my $bin = $bn->to_bin;
+    $bin = "\x0"x(256-$len) . $bin if $len < 256;
+    return $bin;
 }
 
 sub side_a
 {
     my ($p, $g, $g_b, $salt1, $salt2, $pass) = @_;
 
+    my $bn_ctx = Crypt::OpenSSL::Bignum::CTX->new;
+    
     my $p = Crypt::OpenSSL::Bignum->new_from_bin($p);
     my $g = Crypt::OpenSSL::Bignum->new_from_word($g);
     my $g_b = Crypt::OpenSSL::Bignum->new_from_bin($g_b);
     my $a = Crypt::OpenSSL::Bignum->new_from_bin(
         Crypt::OpenSSL::Random::random_pseudo_bytes( 256 )
     );
-    my $g_pad = $g->to_bin;
-    $g_pad = $g_pad . "\x0"x(256 - length($g_pad));
     
-    my $k = Crypt::OpenSSL::Bignum->new_from_bin( sha256( $p->to_bin . $g_pad ) );
-    my $bn_ctx = Crypt::OpenSSL::Bignum::CTX->new;
-
     my $g_a = $g->mod_exp( $a, $p, $bn_ctx );
-    my $u = Crypt::OpenSSL::Bignum->new_from_bin( sha256( $g_a->to_bin . $g_b->to_bin ) );
-
+    
+    my $k = Crypt::OpenSSL::Bignum->new_from_bin( sha256( bn2bin($p) . bn2bin($g) ) );
+    my $u = Crypt::OpenSSL::Bignum->new_from_bin( sha256( bn2bin($g_a) . bn2bin($g_b) ) );
+    
     my $x = Crypt::OpenSSL::Bignum->new_from_bin( tg_ph2( $pass, $salt1, $salt2 ) );
     my $v = $g->mod_exp( $x, $p, $bn_ctx );
     my $k_v = $k->mod_mul( $v, $p, $bn_ctx );
 
-    my $t = $g_b->sub($k_v)->mod($p, $bn_ctx);
-    my $s_a = $t->mod_exp( $a->add($u->mod_mul($x, $p, $bn_ctx))->mod($p, $bn_ctx), $p, $bn_ctx );
-    my $k_a = sha256($s_a->to_bin);
+    my $t = $g_b->sub($k_v);
+    if ($t->cmp(Crypt::OpenSSL::Bignum->zero) == -1) {
+        $t = $t->add($p);
+    }
+    
+    my $exp = $u->mul($x, $bn_ctx);
+    $exp = $exp->add($a);
+    my $s_a = $t->mod_exp( $exp, $p, $bn_ctx );
+    my $k_a = sha256( bn2bin($s_a) );
 
     # M1 := H(H(p) xor H(g) | H2(salt1) | H2(salt2) | g_a | g_b | k_a)
-    my $input = sha256($p->to_bin) ^ sha256($g_pad);
-    $input .= sha256($salt1) . sha256($salt2) . $g_a->to_bin . $g_b->to_bin . $k_a;
+    my $input = sha256( bn2bin($p) ) ^ sha256( bn2bin($g) );
+    $input .= sha256($salt1) . sha256($salt2) . bn2bin($g_a) . bn2bin($g_b) . $k_a;
 
-    return ( $g_a->to_bin, sha256($input) );
+    return ( bn2bin($g_a), sha256($input) );
 }
 
 1;
