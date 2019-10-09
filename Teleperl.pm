@@ -27,6 +27,11 @@ use Telegram::Auth::SignIn;
 use Telegram::Auth::SignUp;
 use Telegram::Auth::ExportAuthorization;
 use Telegram::Auth::ImportAuthorization;
+use Telegram::Auth::CheckPassword;
+use Telegram::InputCheckPasswordSRP;
+
+use Telegram::Account::GetPassword;
+use TeleCrypt::SRP;
 
 use Telegram::Message;
 use Telegram::Peer;
@@ -302,7 +307,7 @@ sub auth
 {
     my ($self, %arg) = @_;
 
-    unless ($arg{code}) {
+    if ($arg{phone}) {
         $self->{_phone} = $arg{phone};
         my %param = $self->{_storage}->tg_param;
         $self->{_tg}->invoke(
@@ -330,7 +335,7 @@ sub auth
             1
         );
     }
-    else {
+    elsif ($arg{code}) {
         if ($self->{_registered}) {
             $self->{_tg}->invoke(
                 Telegram::Auth::SignIn->new(
@@ -385,6 +390,48 @@ sub auth
                 1
             );
         }
+    }
+    elsif ($arg{passwd}) {
+        $self->{_tg}->invoke( Telegram::Account::GetPassword->new, 
+            sub {
+                my $pwd = shift;
+                if ( $pwd->isa('MTProto::RpcError') ) {
+                    $arg{cb}->( error => $pwd->{error_message} ) if defined $arg{cb};
+                    return;
+                }
+                unless ( $pwd->{has_password} ) {
+                    $arg{cb}->( error => "No password is set" ) if defined $arg{cb};
+                    return;
+                }
+                my $algo = $pwd->{current_algo};
+                my ($g_a, $srp_m1) = TeleCrypt::SRP::side_a( 
+                    $algo->{p}, $algo->{g}, $pwd->{srp_B},
+                    $algo->{salt1}, $algo->{salt2}, $arg{passwd}
+                );
+                $self->{_tg}->invoke( Telegram::Auth::CheckPassword->new(
+                        password => Telegram::InputCheckPasswordSRP->new(
+                            srp_id => $pwd->{srp_id},
+                            A => $g_a,
+                            M1 => $srp_m1
+                        )
+                    ), sub {
+                        my $res = shift;
+                        if ($res->isa('MTProto::RpcError')) {
+                            $arg{cb}->( error => $res->{error_message} ) if defined $arg{cb};
+                        }
+                        elsif ($res->isa('Telegram::Auth::Authorization')) {
+                            $arg{cb}->( auth => $res->{user}{id} ) if defined $arg{cb};
+                            $self->{_tg}->flush;
+                        }
+                        else {
+                            say Dumper $res;
+                        }
+                    },
+                    1
+                );
+            },
+            1
+        );
     }
 }
 

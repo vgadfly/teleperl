@@ -1403,6 +1403,19 @@ sub run
 
         } );
     }
+
+    if (defined $options->{pass}) {
+        $tg->auth( passwd => $options->{pass}, cb => sub {
+            my %res = @_;
+
+            if (defined $res{auth}) {
+                say 'Success'
+            }
+            elsif (defined $res{error}) {
+                say "Error $res{error}"
+            }
+        } );
+    }
 }
 
 1;
