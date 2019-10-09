@@ -1,4 +1,4 @@
-package TeleCrypto::Keys;
+package TeleCrypt::Keys;
 
 use warnings;
 use strict;
