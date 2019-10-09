@@ -109,7 +109,7 @@ use MTProto::ClientDHInnerData;
 use MTProto::MsgsAck;
 use MTProto::DestroySession;
 
-use Keys;
+use TeleCrypt::Keys;
 
 sub aes_ige_enc
 {
@@ -336,7 +336,7 @@ sub _phase_one
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes(255-20-length($data));
     $data = "\0". sha1($data) . $data . $pad;
 
-    my @keys = grep {defined} map { Keys::get_key($_) } @{$res_pq->{server_public_key_fingerprints}};
+    my @keys = grep {defined} map { TeleCrypto::Keys::get_key($_) } @{$res_pq->{server_public_key_fingerprints}};
     return $self->_fatal("no suitable Keys on phase one") unless (@keys);
 
     my $rsa = $keys[0];
@@ -348,7 +348,7 @@ sub _phase_one
     $req_dh->{server_nonce} = $res_pq->{server_nonce};
     $req_dh->{p} = $pq_inner->{p};
     $req_dh->{q} = $pq_inner->{q};
-    $req_dh->{public_key_fingerprint} = Keys::key_fingerprint($rsa);
+    $req_dh->{public_key_fingerprint} = TeleCrypto::Keys::key_fingerprint($rsa);
     $req_dh->{encrypted_data} = $enc_data;
 
     $self->_state('phase_two');
