@@ -124,10 +124,14 @@ sub _spawn_tg
         $param{dc}{port} = $options[0]{port};
     }
 
+    my $dc_auth = $dc ? $self->{_storage}->mt_auth->{$dc} : {};
+    unless (defined $dc_auth) {
+        $self->{_storage}->mt_auth->{$dc} = $dc_auth = {};
+    }
     my $tg = Telegram->new( %param,
         force_new_session => $self->{_force_new_session},
         keepalive => 1,
-        auth => $dc ? $self->{_storage}->mt_auth->{$dc} : {},
+        auth => $dc_auth,
         session => ($main and $dc) ? $self->{_storage}->mt_session : {}
     );
     
@@ -163,7 +167,7 @@ sub _migrate
         return;
     }
     $self->{_config}{home_dc} = $dc;
-    $self->{_tg} = $self->_spawn_tg( $self->{_home_dc}, 1 );
+    $self->{_tg} = $self->_spawn_tg( $dc, 1 );
     $self->{_tg}->start;
     $self->{_tg}->invoke( $req->{query}, $req->{cb} );
 }
@@ -390,6 +394,20 @@ sub update_status
     $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
 }
 
+## fetch file
+##
+## named arguments:
+##  type - location type: file, doc, etc.
+##  dc - hosting DC id
+##  reference - file_reference field
+##
+## for doc type:
+##  access_hash field of a document
+##  id of a document
+##
+## for file type (photo file, to be deprecated)
+##  volume_id, local_id and secret fields
+##
 sub fetch_file
 {
     my ($self, %file) = @_;
@@ -455,6 +473,7 @@ sub _fetch_file
     $self->_fetch_file_part( $file, $tg, $loc, 0, 0, $file{cb} );
 }
 
+# XXX: maybe use IO::AIO
 sub _fetch_file_part
 {
     my ($self, $file, $tg, $loc, $part, $size, $cb) = @_;
