@@ -4,7 +4,7 @@ package Telegram;
 
   Telegram API client
 
-  Handles connects, sessions, updates, files, entity cache
+  Valid states: init, connecting, connected, idle, fatal
 
 =cut
 
@@ -26,16 +26,10 @@ use MTProto::Ping;
 
 ## Telegram API
 
-use TeleUpd;
-
 # Layer and Connection
 use Telegram::InvokeWithLayer;
+use Telegram::InvokeWithoutUpdates;
 use Telegram::InitConnection;
-
-# Auth
-use Telegram::Auth::SendCode;
-use Telegram::Auth::SentCode;
-use Telegram::Auth::SignIn;
 
 use Telegram::ChannelMessagesFilter;
 use Telegram::Account::UpdateStatus;
@@ -50,21 +44,30 @@ use Telegram::InputPeer;
 
 use base 'Class::Stateful';
 use fields qw(
-    _mt _dc _code_cb _app _proxy _timer _first _code_hash _req _lock _flood_timer
-    _queue _upd reconnect session debug keepalive noupdate minutonline error
-    on_update on_error on_raw_msg after_invoke
+    _mt _dc _app _proxy _timer _first _req _lock _flood_timer _queue _upd 
+    reconnect session auth keepalive noupdate force_new_session
 );
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( on_update on_error on_raw_msg after_invoke noupdate minutonline debug keepalive reconnect );
+    my @args = qw( noupdate keepalive reconnect force_new_session session auth );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     $self->SUPER::new( 
         init => undef,
         connecting => undef,
-        connected => [ sub { $self->_dequeue }, sub { $self->{_lock} = 1 } ],
+        connected => [ 
+            sub { 
+                $self->_dequeue;
+                $self->event('connected');
+                $self->{_timer} = AE::timer 0, 45, $self->_get_timer_cb;
+            }, 
+            sub { 
+                $self->{_lock} = 1; 
+                $self->{_timer} = undef;
+            } 
+        ],
         idle => undef
     );
     $self->_state('init');
@@ -72,18 +75,11 @@ sub new
     $self->{_dc} = $arg{dc};
     $self->{_proxy} = $arg{proxy};
     $self->{_app} = $arg{app};
-    $self->{_code_cb} = $arg{on_auth};
 
     @$self{@args} = @arg{@args};
 
-    # XXX: handle old session files
-    my $session = $arg{session};
-    $session->{mtproto} = {} unless exists $session->{mtproto};
-    $self->{session} = $session;
     $self->{_first} = 1;
     $self->{_lock} = 1;
-
-    $self->{_upd} = TeleUpd->new($session->{update_state}, $self);
 
     return $self;
 }
@@ -126,28 +122,27 @@ sub _mt
 {    
     my( $self, $aeh ) = @_;
 
-    my $mt = MTProto->new( socket => $aeh, session => $self->{session}{mtproto},
-            debug => $self->{debug}
+    my $force_new = $self->{force_new_session} // 0;
+
+    my $mt = MTProto->new( 
+            socket => $aeh, 
+            session => ( $force_new ? {} : $self->{session} ),
+            keys => $self->{auth}, 
     );
-    $mt->reg_cb( state => sub { shift; AE::log debug => "MTP state @_" } );
-    $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_"; die } );
+    $self->{_mt} = $mt;
+    
+    $mt->reg_cb( state => sub { 
+            shift; AE::log debug => "MTP state @_";
+            if ($_[0] eq 'session_ok') {
+                $self->_state('connected');
+            }
+    } );
+    $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_" } );
     $mt->reg_cb( message => sub { shift; $self->_msg_cb(@_) } );
-    $mt->reg_cb( socket_error => sub { shift; $self->_socket_err_cb(@_) } );
-    $mt->reg_cb( mt_error => sub { shift; AE::log warn => "tcp transport error: @_" } );
+    $mt->reg_cb( error => sub { shift; $self->_error_cb(@_) } );
 
     $mt->start_session;
-    $self->{_mt} = $mt;
-    $self->_state('connected');
 
-    $self->run_updates unless $self->{noupdate};
-    $self->_dequeue; # unlock
-}
-
-sub run_updates {
-    my $self = shift;
-
-    $self->{_timer} = AnyEvent->timer( after => 45, interval => 45, cb => $self->_get_timer_cb );
-    $self->{_upd}->sync; 
 }
 
 sub _real_invoke
@@ -159,7 +154,7 @@ sub _real_invoke
             $self->{_req}{$req_id}{query} = $query;
             $self->{_req}{$req_id}{cb} = $cb if defined $cb;
             AE::log debug => "invoked $req_id for " . ref $query;
-            &{$self->{after_invoke}}($req_id, $query, $cb) if defined $self->{after_invoke};
+            $self->event('after_invoke', $req_id, $query, $cb);
         } 
     ] );
 }
@@ -168,12 +163,12 @@ sub _real_invoke
 
 sub invoke
 {
-    my ($self, $query, $res_cb) = @_;
+    my ($self, $query, $res_cb, $service) = @_;
     my $req_id;
 
-    die unless defined $query;
+    Carp::confess unless defined $query;
     AE::log info => "invoke: " . ref $query;
-    AE::log trace => Dumper $query if $self->{debug};
+    AE::log trace => Dumper $query;
     if ($self->{_first}) {
         AE::log debug => "first, using wrapper";
         my $inner = $query;
@@ -192,10 +187,10 @@ sub invoke
         $query = Telegram::InvokeWithLayer->new( layer => 91, query => $conn ); 
         $self->{_first} = 0;
     }
-    elsif ($self->{noupdate}) {
+    elsif ( $self->{noupdate} ) {
         $query = Telegram::InvokeWithoutUpdates->new( query => $query );
     }
-    if ($self->{_lock}) {
+    if ($self->{_lock} and not $service) {
         $self->_enqueue( $query, $res_cb );
     }
     else {
@@ -218,52 +213,11 @@ sub _dequeue
     $self->{_lock} = 0;
 }
 
-sub auth
-{
-    my ($self, %arg) = @_;
-
-    unless ($arg{code}) {
-        $self->{session}{phone} = $arg{phone};
-        $self->invoke(
-            Telegram::Auth::SendCode->new( 
-                phone_number => $arg{phone},
-                api_id => $self->{_app}{api_id},
-                api_hash => $self->{_app}{api_hash},
-                flags => 0
-            ),
-            sub {
-                my $res = shift;
-                if ($res->isa('Telegram::Auth::SentCode')) {
-                    $self->{_code_hash} = $res->{phone_code_hash};
-                }
-
-                &{$arg{cb}}($res) if defined $arg{cb};
-            }
-	    );
-    }
-    else {
-        $self->invoke(
-            Telegram::Auth::SignIn->new(
-                phone_number => $self->{session}{phone},
-                phone_code_hash => $self->{_code_hash},
-                phone_code => $arg{code}
-        ), $arg{cb});
-    }
-}
-
-sub update
+sub flush
 {
     my $self = shift;
-
-    $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) );
-    $self->invoke( Telegram::Updates::GetState->new, sub {
-            my $us = shift;
-            if ($us->isa('Telegram::Updates::State')) {
-                $self->{session}{update_state}{seq} = $us->{seq};
-                $self->{session}{update_state}{pts} = $us->{pts};
-                $self->{session}{update_state}{date} = $us->{date};
-            }
-        } );
+    $self->{_queue} = [];
+    $self->_state('connected');
 }
 
 sub _handle_rpc_result
@@ -272,14 +226,22 @@ sub _handle_rpc_result
 
     my $req_id = $res->{req_msg_id};
     my $defer = 0;
-    AE::log debug => "Got result %s for $req_id", ref $res->{result} if $self->{debug};
+    AE::log debug => "Got result %s for $req_id", ref $res->{result};
+    
+    # Updates in result
+    $self->event( update => $res->{result} )
+        if ( $res->{result}->isa('Telegram::UpdatesABC') );
+
+    # Errors
     if ($res->{result}->isa('MTProto::RpcError')) {
         $defer = $self->_handle_rpc_error($res->{result}, $req_id);
     }
-    if (defined $self->{_req}{$req_id}{cb}) {
-        &{$self->{_req}{$req_id}{cb}}( $res->{result} );
+    # FLOOD_WAIT is handled here
+    unless ($defer) {
+        $self->{_req}{$req_id}{cb}->( $res->{result} )
+            if defined $self->{_req}{$req_id}{cb};
+        delete $self->{_req}{$req_id};
     }
-    delete $self->{_req}{$req_id} unless $defer;;
 }
 
 sub _handle_rpc_error
@@ -287,17 +249,20 @@ sub _handle_rpc_error
     my ($self, $err, $req_id) = @_;
     my $defer = 0;
 
-    &{$self->{on_error}}($err) if defined $self->{on_error};
-    $self->{error} = $err;
-
-    AE::log warn => "RPC error %s on req %d", $err->{error_message}, $req_id;
+    #$self->event(error => $err);
+    
+    AE::log warn => "RPC error %d:%s on req %d", 
+        $err->{error_code}, $err->{error_message}, $req_id;
+    
     if ($err->{error_message} eq 'USER_DEACTIVATED') {
         $self->{_timer} = undef;
-        &{$self->{_code_cb}}($err->{error_code}, $err->{error_message}) if $self->{_code_cb};
+        $self->event("banned");
+        $self->_state('idle');
     }
     if ($err->{error_message} eq 'AUTH_KEY_UNREGISTERED') {
         $self->{_timer} = undef;
-        &{$self->{_code_cb}}($err->{error_code}, $err->{error_message}) if $self->{_code_cb};
+        $self->event('auth');
+        $self->_state('idle');
     }
     if ($err->{error_message} =~ /^FLOOD_WAIT_/) {
         my $to = $err->{error_message};
@@ -316,22 +281,33 @@ sub _handle_rpc_error
                 $self->_state('connected');
         });
     }
+    if ( $err->{error_code} == 303 and not $err->{error_message} =~ /^FILE_/ ) {
+        # migrate
+        my $dc = $err->{error_message};
+        $dc =~ s/^.*_MIGRATE_//;
+        $defer = 1;
+        $self->event(migrate => $dc, $self->{_req}{$req_id});
+    }
     return $defer;
 }
 
-sub _socket_err_cb
+sub _error_cb
 {
     my ($self, $err) = @_;
-    AE::log warn => "Socket error: $err";
+    #say Dumper @_;
+    AE::log warn => ref($err).": ".($err->{error_message} // $err->{error_code});
 
-    if ($self->{reconnect}) {
+    if ( $err->isa('MTProto::SocketError') and $self->{reconnect} ) {
         undef $self->{_mt};
         $self->start;
     }
     else {
-        my $e = { error_message => $err };
-        $self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
-        $self->_state('idle');
+        #my $e = { error_message => $err };
+        #$self->_handle_rpc_error(bless($e, 'MTProto::NetError'));
+        $self->_state('fatal');
+        delete $self->{_timer};
+        # throw it again
+        $self->event( error => $err );
     }
 }
 
@@ -340,265 +316,35 @@ sub _msg_cb
     my $self = shift;
     my $msg = shift;
     AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
-    AE::log trace => Dumper $msg->{object} if $self->{debug};
-    &{$self->{on_raw_msg}}( $msg->{object} ) if $self->{on_raw_msg};
+    AE::log trace => Dumper $msg->{object};
 
     # RpcResults
     $self->_handle_rpc_result( $msg->{object} )
         if ( $msg->{object}->isa('MTProto::RpcResult') );
 
     # RpcErrors
+    # NOT HERE
     $self->_handle_rpc_error( $msg->{object} )
         if ( $msg->{object}->isa('MTProto::RpcError') );
 
     # Updates
-    $self->{_upd}->handle_updates( $msg->{object} )
+    $self->event( update => $msg->{object} )
         if ( $msg->{object}->isa('Telegram::UpdatesABC') );
 
     # New session created, some updates can be missing
     if ( $msg->{object}->isa('MTProto::NewSessionCreated') ) {
-
+        $self->event('new_session');
     }
-}
-
-sub get_messages
-{
-    local $_;
-    my $self = shift;
-    my @input;
-    for (@_) {
-        push @input, Telegram::InputMessageID->new( id => $_ );
-    }
-    $self->invoke( Telegram::Messages::GetMessages->new( id => [@input] ) );
-}
-
-sub send_text_message
-{
-    my ($self, %arg) = @_;
-
-    my $msg = Telegram::Messages::SendMessage->new(
-        map {
-            $arg{$_} ? ( $_ => $arg{$_} ) : ()
-        } qw(no_webpage silent background clear_draft reply_to_msg_id entities)
-    );
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
-
-    $msg->{message} = $arg{message};    # TODO check utf8
-    $msg->{random_id} = int(rand(65536));
-
-    my $peer;
-    if (exists $users->{$arg{to}}) {
-        $peer = Telegram::InputPeerUser->new( 
-            user_id => $arg{to}, 
-            access_hash => $users->{$arg{to}}{access_hash}
-        );
-    }
-    if (exists $chats->{$arg{to}}) {
-        $peer = Telegram::InputPeerChannel->new( 
-            channel_id => $arg{to}, 
-            access_hash => $chats->{$arg{to}}{access_hash}
-        ) if defined $chats->{$arg{to}}{access_hash};
-    }
-
-    if ($arg{to}->isa('Telegram::PeerChannel')) {
-        $peer = Telegram::InputPeerChannel->new( 
-            channel_id => $arg{to}->{channel_id}, 
-            access_hash => $chats->{$arg{to}->{channel_id}}{access_hash}
-        );
-    }
-    unless (defined $peer) {
-        $peer = Telegram::InputPeerChat->new( chat_id => $arg{to} );
-    }
-
-    $msg->{peer} = $peer;
-
-    AE::log trace => Dumper $msg if defined $self->{debug};
-    $self->invoke( $msg ) if defined $peer;
-}
-
-sub _cache_users
-{
-    my ($self, @users) = @_;
-    
-    for my $user (@users) {
-        $self->{session}{users}{$user->{id}} = { 
-            access_hash => $user->{access_hash},
-            username => $user->{username},
-            first_name => $user->{first_name},
-            last_name => $user->{last_name}
-        };
-        $self->{session}{self_id} = $user->{id} if $user->{self};
-    }
-}
-
-sub _cache_chats
-{
-    my ($self, @chats) = @_;
-    
-    for my $chat (@chats) {
-        next if $chat->isa('Telegram::ChannelForbidden');
-        if (exists $self->{session}{chats}{$chat->{id}}) {
-            # old regular chats don't have access_hash o_O
-            if (exists $chat->{access_hash}) {
-                $self->{session}{chats}{$chat->{id}}{access_hash} = $chat->{access_hash};
-                $self->{session}{chats}{$chat->{id}}{username} = $chat->{username};
-                $self->{session}{chats}{$chat->{id}}{title} = $chat->{title};   
-            } 
-            else {
-                $self->{session}{chats}{$chat->{id}}{title} = $chat->{title};
-            }
-
-        }
-        else {
-            # old regular chats don't have access_hash o_O
-            if (exists $chat->{access_hash}) {
-                $self->{session}{chats}{$chat->{id}} = {
-                    access_hash => $chat->{access_hash},
-                    username => $chat->{username},
-                    title => $chat->{title}
-                };
-            }
-            else {
-                $self->{session}{chats}{$chat->{id}} = {
-                    title => $chat->{title}
-                };
-            }
-        }
-    }
-}
-
-sub cached_usernames
-{
-    my $self = shift;
-    
-    return map { ($_->{first_name} // '').' '.($_->{last_name} // '') } 
-           grep { $_->{first_name} or $_->{last_name} } 
-           values %{$self->{session}{users}};
-}
-
-sub cached_nicknames
-{
-    my $self = shift;
-
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
-    
-    return map { '@'.$_->{username} } grep { $_->{username} } 
-          ( values %$users, values %$chats );
-}
-
-sub name_to_id
-{
-    my ($self, $nick) = @_;
-
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
-
-    if ($nick =~ /^@/) {
-        $nick =~ s/^@//;
-        for my $uid (keys %$users) {
-            return $uid if defined $users->{$uid}{username} and $users->{$uid}{username} eq $nick;
-        }
-        for my $uid (keys %$chats) {
-            return $uid if defined $chats->{$uid}{username} and $chats->{$uid}{username} eq $nick;
-        }
-    }
-    elsif ($nick =~ /^[0-9]+$/) {
-        return $nick if exists $users->{$nick} or exists $chats->{$nick};
-    }
-    else {
-        for my $uid (keys %$users) {
-            return $uid if ($users->{$uid}{first_name} // '').' '.($users->{$uid}{last_name} // '') eq $nick;
-        }
-    }
-
-    return undef;
-}
-
-sub peer
-{
-    my ($self, $nick) = @_;
-
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
-
-    if ($nick =~ /^@/) {
-        $nick =~ s/^@//;
-        for my $uid (keys %$users) {
-            return Telegram::InputPeerUser->new( 
-                user_id => $uid, 
-                access_hash => $users->{$uid}{access_hash}
-            ) if defined $users->{$uid}{username} and $users->{$uid}{username} eq $nick;
-        }
-        for my $uid (keys %$chats) {
-            return Telegram::InputPeerChat->new( 
-                chat_id => $uid, 
-                access_hash => $chats->{$uid}{access_hash}
-            ) if defined $chats->{$uid}{username} and $chats->{$uid}{username} eq $nick;
-        }
-    }
-    return undef;
-}
-
-sub peer_from_id
-{
-    my ($self, $id) = @_;
-    croak "peer_from_id: undefined id" unless defined $id;
-
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
-
-    if (exists $users->{$id}) {
-        return Telegram::InputPeerUser->new( 
-            user_id => $id, 
-            access_hash => $users->{$id}{access_hash}
-        );
-    }
-    if (exists $chats->{$id}) {
-        if (defined $chats->{$id}{access_hash}) {
-            return Telegram::InputPeerChannel->new( 
-                channel_id => $id, 
-                access_hash => $chats->{$id}{access_hash}
-            );
-        }
-        else {
-            return Telegram::InputPeerChat->new( 
-                chat_id => $id, 
-            );
-        }
-    }
-    return undef;
-}
-
-sub peer_name
-{
-    my ($self, $id, $noundef) = @_;
-    croak unless defined $id;
-
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
-
-    if (exists $users->{$id}) {
-        AE::log trace => "found user $id " . Dumper($users->{$id}) if $self->{debug};
-        return ($users->{$id}{first_name} // '' ).' '.($users->{$id}{last_name} // '');
-    }
-    if (exists $chats->{$id}) {
-        AE::log trace => "found chat $id " . Dumper($chats->{$id}) if $self->{debug};
-        return ($chats->{$id}{title} // "chat $id");
-    }
-    return $id if $noundef;
-    return undef;
 }
 
 sub _get_timer_cb
 {
     my $self = shift;
     return sub {
-        AE::log debug => "timer tick" if $self->{debug};
-        $self->invoke( Telegram::Account::UpdateStatus->new( offline => 0 ) )
-            if not defined $self->{minutonline} or $self->{minutonline} and int(AE::now / 60) % $self->{minutonline} == 0;
-        $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) if $self->{keepalive};
+        local *__ANON__ = 'Telegram::_timer_cb';
+        AE::log debug => "timer tick";
+        $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) 
+            if $self->{keepalive};
     }
 }
 

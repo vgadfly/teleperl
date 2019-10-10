@@ -68,8 +68,18 @@ package MTProto;
 use Data::Dumper;
 
 use base 'Class::Stateful';
-use fields qw( debug session noack last_error 
-    _lock _pending _tcp_first _aeh _pq _queue );
+use fields qw( 
+    session keys noack _timeshift
+    _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack _rtt _ma_pool 
+);
+
+use constant {
+    MAX_WSZ => 16,
+    START_RTT => 15,
+    MA_INT => 4
+};
+
+use Time::HiRes qw/time/;
 
 use AnyEvent;
 use AnyEvent::Handle;
@@ -99,7 +109,7 @@ use MTProto::ClientDHInnerData;
 use MTProto::MsgsAck;
 use MTProto::DestroySession;
 
-use Keys;
+use TeleCrypt::Keys;
 
 sub aes_ige_enc
 {
@@ -150,15 +160,15 @@ sub aes_ige_dec
 sub gen_msg_key
 {
     my ($self, $plain, $x) = @_;
-    my $msg_key = substr( sha256(substr($self->{session}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
+    my $msg_key = substr( sha256(substr($self->{keys}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
     return $msg_key;
 }
 
 sub gen_aes_key
 {
     my ($self, $msg_key, $x) = @_;
-    my $sha_a = sha256( $msg_key . substr($self->{session}{auth_key}, $x, 36) );
-    my $sha_b = sha256( substr($self->{session}{auth_key}, 40+$x, 36) . $msg_key );
+    my $sha_a = sha256( $msg_key . substr($self->{keys}{auth_key}, $x, 36) );
+    my $sha_b = sha256( substr($self->{keys}{auth_key}, 40+$x, 36) . $msg_key );
     my $aes_key = substr($sha_a, 0, 8) . substr($sha_b, 8, 16) . substr($sha_a, 24, 8);
     my $aes_iv = substr($sha_b, 0, 8) . substr($sha_a, 8, 16) . substr($sha_b, 24, 8);
     return ($aes_key, $aes_iv);
@@ -167,7 +177,7 @@ sub gen_aes_key
 
 sub new
 {
-    my @args = qw(session debug noack);
+    my @args = qw(keys session noack);
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
@@ -178,9 +188,15 @@ sub new
         phase_three => undef,
         session_ok => undef
     );
-    
+   
+    $self->{_timeshift} = 0;
     $self->{_tcp_first} = 1;
     $self->{_lock} = 0;
+    $self->{_wsz} = 1;
+    $self->{_rtt_ack} = 1;
+    $self->{_rtt} = START_RTT;
+    $self->{_ma_pool} = [ (START_RTT) x MA_INT ];
+    $self->{_queue} = [];
     $self->_state('init');
     
     @$self{@args} = @arg{@args};
@@ -199,6 +215,7 @@ sub _get_read_cb
 {
     my $self = shift;
     return sub {
+        local *__ANON__ = 'MTProto::_read_cb';
         # all reads start with recving packet length
         $self->{_aeh}->unshift_read( chunk => 4, sub {
                 my $len = unpack "L<", $_[1];
@@ -206,7 +223,7 @@ sub _get_read_cb
                     # it is error
                     $_[0]->unshift_read( chunk => $len, sub {
                             my $error = $_[1];
-                            $self->_handle_error($error);
+                            $self->_handle_error(unpack("l<", $error));
                     } )
                 } else {
                     $_[0]->unshift_read( chunk => $len, sub {
@@ -222,9 +239,11 @@ sub _get_error_cb
 {
     my $self = shift;
     return sub {
+        local *__ANON__ = 'MTProto::_error_cb';
         my ($hdl, $fatal, $msg) = @_;
-        $self->event( socket_error => $msg );
-        $self->{last_error} = {message => $msg};
+        AE::log error => $!.':'.$msg;
+        my $e = { error_message => $msg };
+        $self->event( error => bless($e, 'MTProto::SocketError') );
         $hdl->destroy;
         $self->_state('fatal');
     }
@@ -244,13 +263,18 @@ sub start_session
 {
     my $self = shift;
 
-    return $self->_state('session_ok') if defined $self->{session}{auth_key};
+    # generate new session id unless we continue old session
+    unless (defined $self->{session}{id}) {
+        $self->{session}{id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+        $self->{session}{seq} = 0;
+    }
+
+    return $self->_state('session_ok') if defined $self->{keys}{auth_key};
 
     $self->_state('phase_one');
 
-    AE::log debug => "starting new session\n" if $self->{debug};
+    AE::log debug => "starting new session\n";
 
-    $self->{session}{seq} = 0;
 
 #
 # STEP 1: PQ Request
@@ -285,7 +309,7 @@ sub _phase_one
     return $self->_fatal('no ResPQ on phase one') 
         unless $res_pq->isa("MTProto::ResPQ");
 
-    AE::log debug => "got ResPQ\n" if $self->{debug};
+    AE::log debug => "got ResPQ\n";
 
     my $pq = unpack "Q>", $res_pq->{pq};
     my @pq = factor($pq);
@@ -312,7 +336,7 @@ sub _phase_one
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes(255-20-length($data));
     $data = "\0". sha1($data) . $data . $pad;
 
-    my @keys = grep {defined} map { Keys::get_key($_) } @{$res_pq->{server_public_key_fingerprints}};
+    my @keys = grep {defined} map { TeleCrypt::Keys::get_key($_) } @{$res_pq->{server_public_key_fingerprints}};
     return $self->_fatal("no suitable Keys on phase one") unless (@keys);
 
     my $rsa = $keys[0];
@@ -324,7 +348,7 @@ sub _phase_one
     $req_dh->{server_nonce} = $res_pq->{server_nonce};
     $req_dh->{p} = $pq_inner->{p};
     $req_dh->{q} = $pq_inner->{q};
-    $req_dh->{public_key_fingerprint} = Keys::key_fingerprint($rsa);
+    $req_dh->{public_key_fingerprint} = TeleCrypt::Keys::key_fingerprint($rsa);
     $req_dh->{encrypted_data} = $enc_data;
 
     $self->_state('phase_two');
@@ -373,7 +397,7 @@ sub _phase_two
     $self->_fatal('bad DHInnerData: '.ref $dh_inner) 
         unless $dh_inner->isa('MTProto::ServerDHInnerData');
     
-    AE::log debug => "got ServerDHInnerData\n" if $self->{debug};
+    AE::log debug => "got ServerDHInnerData\n";
 
     return $self->_fatal("bad nonce") unless $dh_inner->{nonce}->equals( $nonce );
     return $self->_fatal("bad server_nonce") 
@@ -412,7 +436,7 @@ sub _phase_two
     $dh_par->{encrypted_data} = $enc_data;
 
     # session auth key
-    $self->{session}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
+    $self->{keys}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
 
     $self->_state('phase_three');
     $self->_send_plain( pack( "(a4)*", $dh_par->pack ) );
@@ -431,7 +455,7 @@ sub _phase_three
     my $nonce = $self->{_pq}{nonce};
     my $new_nonce = $self->{_pq}{new_nonce};
     my $server_nonce = $self->{_pq}{server_nonce};
-    my $auth_key = $self->{session}{auth_key};
+    my $auth_key = $self->{keys}{auth_key};
     
     my @stream = unpack( "(a4)*", $data );
     return $self->_fatal('no data on phase three') unless @stream;
@@ -453,11 +477,9 @@ sub _phase_three
 
     AE::log debug => "session started";
 
-    $self->{session}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
-    $self->{session}{session_id} = Crypt::OpenSSL::Random::random_pseudo_bytes(8);
-    #$self->{session}{auth_key} = $auth_key;
-    $self->{session}{auth_key_id} = $auth_key_hash;
-    $self->{session}{auth_key_aux} = $auth_key_aux_hash;
+    $self->{keys}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
+    $self->{keys}{auth_key_id} = $auth_key_hash;
+    $self->{keys}{auth_key_aux} = $auth_key_aux_hash;
     
     # ecrypted connection established
     delete $self->{_pq};
@@ -499,6 +521,10 @@ sub _send_plain
 sub _enqueue
 {
     my ($self, $in_msg) = @_;
+    
+    AE::log debug => "EQ: pending ".scalar(keys %{$self->{_pending}}).
+        ", in q ".scalar(@{$self->{_queue}})." w=$self->{_wsz}";
+    
     push @{$self->{_queue}}, $in_msg;
 }
 
@@ -512,7 +538,14 @@ sub _dequeue
 
     $self->{_lock} = 0;
 
-    $self->_real_send($_) while ($_ = shift @{$self->{_queue}});
+    AE::log debug => "DQ: pending ".scalar(keys %{$self->{_pending}}).
+        ", in q ".scalar(@{$self->{_queue}})." w=$self->{_wsz}";
+
+    while ( scalar(keys %{$self->{_pending}}) < $self->{_wsz} ) {
+        $_ = shift @{$self->{_queue}};
+        last unless $_;
+        $self->_real_send($_);
+    }
 }
 
 ## send encrypted message(s)
@@ -536,11 +569,11 @@ sub send
     
     # check if session is ready
     unless ($self->{_state} eq 'session_ok') {
-        AE::log debug => "session not ready, queueing\n" if $self->{debug};
+        AE::log debug => "session not ready, queueing\n";
         $self->_enqueue($_) for @msg;
         return;
     }
-    if ( $self->{_lock} ) {
+    if ( $self->{_lock} or scalar(keys %{$self->{_pending}}) >= $self->{_wsz} ) {
         $self->_enqueue($_) for @msg;
     }
     else {
@@ -557,9 +590,16 @@ sub _real_send
     my ($obj, $id_cb, $is_service) = @$msg;
     my $seq = $self->{session}{seq};
     $seq += 1 unless $is_service;
-    my $message = MTProto::Message->new( $seq, $obj );
+    my $msgid = MTProto::Message::msg_id() + $self->{_timeshift} + ($seq << 2);
+    my $message = eval { MTProto::Message->new( $seq, $obj, $msgid) };
+    if ($@) {
+        my $e = bless( { error_message => $@ }, 'MTProto::PackException' );
+        $self->event( error =>  $e );
+        $self->_state('fatal');
+        return;
+    }
     $self->{session}{seq} += 2 unless $is_service;
-    $self->{_pending}{$message->{msg_id}} = $msg unless $is_service;
+    $self->{_pending}{$msgid} = $msg unless $is_service;
 
     # init tcp intermediate (no seq_no & crc)
     if ($self->{_tcp_first}) {
@@ -567,44 +607,105 @@ sub _real_send
         $self->{_tcp_first} = 0;
     }
     
-    my $payload = $message->pack;
+    my $payload = eval { $message->pack };
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
         -(12+length($message->{data})) % 16 + 12 );
 
-    my $plain = $self->{session}{salt} . $self->{session}{session_id} . $payload . $pad;
+    my $plain = $self->{keys}{salt} . $self->{session}{id} . $payload . $pad;
 
     my $msg_key = $self->gen_msg_key( $plain, 0 );
     my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
     my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
 
-    my $packet = $self->{session}{auth_key_id} . $msg_key . $enc_data;
+    my $packet = $self->{keys}{auth_key_id} . $msg_key . $enc_data;
 
     AE::log debug => "sending $message->{seq}:$message->{msg_id} ".
         "(".ref($message->{object})."), ".
         length($packet). " bytes encrypted\n";
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
+    $msg->[3] = time;
+    # XXX
+    AnyEvent->now_update;
+    $msg->[4] = AE::timer( $self->{_rtt} * 4, $self->{_rtt} * 2, sub {
+            $self->_handle_rto($msgid) 
+        } );
 }
 
-## low level error reporting
 sub _handle_error
 {
-    my ($self, $err) = @_;
-    my $error = unpack( "l<", $err );
-    $self->event( mt_error => $error );
-    $self->{last_error} = { code => $error };
+    my ($self, $error) = @_;
+
+    $self->event( error => bless( {error_code => $error}, "MTProto::TransportError" ) );
     $self->_state('fatal');
+}
+
+sub _handle_nack
+{
+    my $self = shift;
+    
+    if ($self->{_wsz} > 1) {
+        $self->{_wsz} /= 2;
+        $self->{_rtt_ack} = $self->{_wsz};
+    }
+}
+
+sub _handle_rto
+{
+    my ($self, $msgid) = @_;
+
+    $self->_handle_nack;
+
+    if (exists $self->{_pending}{$msgid}){
+        my $time = time;
+        my $pending = $self->{_pending}{$msgid}[3];
+
+        # WTF
+        if ( $time - $pending < $self->{_rtt} * 2 ) {
+            AE::log debug => "premature RTO for %d (%f, %f, %f)", $msgid,
+                $pending, $time, $time - $pending;
+        }
+        else {
+            $self->send( $self->{_pending}{$msgid} );
+            delete $self->{_pending}{$msgid};
+        }
+    }
+}
+
+sub _handle_ack
+{
+    my ($self, $msgid) = @_;
+
+    if (exists $self->{_pending}{$msgid}) {
+        my $last = shift @{$self->{_ma_pool}};
+        my $now = time;
+        my $pending = $self->{_pending}{$msgid}[3];
+        my $current = $now - $pending;
+        $self->{_rtt} += ( $current - $last ) / MA_INT;
+        AE::log debug => "new RTT is $self->{_rtt}";
+        push @{$self->{_ma_pool}}, $current;
+    }
+
+    if ( --$self->{_rtt_ack} == 0 and $self->{_wsz} < MAX_WSZ ) {
+        $self->{_wsz} *= 2;
+        $self->{_rtt_ack} = $self->{_wsz};
+    }
+    $self->{_pending}{$msgid}[1]->($msgid) if defined $self->{_pending}{$msgid}[1];
+    delete $self->{_pending}{$msgid};
+
+    $self->_dequeue;
 }
 
 sub _handle_msg
 {
     my ($self, $msg, $in_container) = @_;
+    local $_;
 
     AE::log debug => "handle_msg $msg->{seq},$msg->{msg_id}: " . ref $msg->{object};
 
     # unpack msg containers
     my $objid = unpack( "L<", substr($msg->{data}, 0, 4) );
     if ($objid == 0x73f1f8dc) {
-        AE::log debug => "Container\n" if $self->{debug};
+        AE::log trace => "Container\n";
 
         my $data = $msg->{data};
         my $msg_count = unpack( "L<", substr($data, 4, 4) );
@@ -625,7 +726,7 @@ sub _handle_msg
     }
     # gzip
     elsif ($objid == 0x3072cfa1) {
-        AE::log debug => "gzip\n" if $self->{debug};
+        AE::log trace => "gzip\n";
         
         my @stream = unpack "(a4)*", substr($msg->{data}, 4);
         my $zdata = TL::Object::unpack_string(\@stream);
@@ -635,8 +736,6 @@ sub _handle_msg
         @stream = unpack "(a4)*", $objdata;
         my $ret = TL::Object::unpack_obj(\@stream);
         
-        #print "inflated: ", unpack ("H*", $objdata), "\n" if $self->{debug};
-        #print ref $ret if defined $ret;
         $msg->{data} = $objdata;
         $msg->{object} = $ret;
         $self->_handle_msg( $msg, $in_container ) if defined $ret;
@@ -644,20 +743,16 @@ sub _handle_msg
     else {
     # service msg handlers
         my $m = $msg;
-        if ($m->{object}->isa('MTProto::Pong')) {
-            delete $self->{_pending}{$m->{object}{msg_id}};
-        }
+        $self->_handle_ack( $m->{object}{msg_id} ) if $m->{object}->isa('MTProto::Pong');
+
         if ($m->{object}->isa('MTProto::MsgsAck')) {
-            for (@{$m->{object}{msg_ids}}) {
-                $self->{_pending}{$_}[1]->($_) if defined $self->{_pending}{$_}[1];
-                delete $self->{_pending}{$_};
-            }
+            $self->_handle_ack($_) for @{$m->{object}{msg_ids}};
         }
-        if ($m->{object}->isa('MTProto::BadServerSalt')) {
-            $self->{session}{salt} = pack "Q<", $m->{object}{new_server_salt};
-            $self->resend($m->{object}{bad_msg_id});
+        elsif ($m->{object}->isa('MTProto::BadServerSalt')) {
+            $self->{keys}{salt} = pack "Q<", $m->{object}{new_server_salt};
+            $self->_resend($m->{object}{bad_msg_id});
         }
-        if ($m->{object}->isa('MTProto::BadMsgNotification')) {
+        elsif ($m->{object}->isa('MTProto::BadMsgNotification')) {
             # sesssion not in sync: destroy and make new
             my $ecode = $m->{object}{error_code};
             my $bad_msg = $m->{object}{bad_msg_id};
@@ -668,37 +763,53 @@ sub _handle_msg
                 # 33: msg_seqno too high
                 #
                 # start new session
-                # XXX: don't start new session for service messages, i.e. acks
-                if (exists $self->{_pending}{$bad_msg}){
-                    $self->{session}{session_id} = 
+                if (exists $self->{_pending}{$bad_msg}) {
+                    $self->{session}{id} = 
                         Crypt::OpenSSL::Random::random_pseudo_bytes(8);
                     $self->{session}{seq} = 0;
-                    $self->resend($bad_msg);
+                    $self->_resend($bad_msg);
+                }
+            }
+            elsif ( $ecode == 16 or $ecode == 17 ) {
+                my $timeshift = ($m->{msg_id} >> 32) - ($m->{object}{bad_msg_id} >> 32);
+                AE::log warn => "clock out of sync by %d, adjusting", $timeshift;
+                $self->{_timeshift} = $timeshift * 2**32;
+                if (exists $self->{_pending}{$bad_msg}) {
+                    $self->{session}{id} = 
+                        Crypt::OpenSSL::Random::random_pseudo_bytes(8);
+                    $self->{session}{seq} = 0;
+                    $self->_resend($bad_msg);
                 }
             }
             else {
                 # other errors, that cannot be fixed in runtime
-                # XXX: handle 16 and 17, sync clock
-                $self->event( mt_error => $ecode );
+                my $e = { error_code => $ecode };
+                $self->event( error => bless($e, 'MTProto::Error') );
                 $self->_state('fatal');
+                return;
             }
         }
-        if ($m->{object}->isa('MTProto::RpcResult')) {
-            #AE::log trace => Dumper $m->{object};
-            my $id = $m->{object}{req_msg_id};
-            $self->{_pending}{$id}[1]->($id) if defined $self->{_pending}{$id}[1];
-            delete $self->{_pending}{$id};
+        elsif ($m->{object}->isa('MTProto::MsgDetailedInfoABC')) {
+            $self->event( error => bless(
+                { error_message =>"Unhandled MsgDetailedInfo" },
+                'MTProto::Error'
+                )
+            );
+            $self->_state('fatal');
+            return;
         }
-        if (($m->{seq} & 1) and not $self->{noack} and not $in_container) {
-            # ack content-related messages
-            $self->_ack($m->{msg_id});
-        }
+        else {
+            if ($m->{object}->isa('MTProto::RpcResult')) {
+                $self->_handle_ack( $m->{object}{req_msg_id} );
+            }
+            if (($m->{seq} & 1) and not $self->{noack} and not $in_container) {
+                # ack content-related messages
+                $self->_ack($m->{msg_id});
+            }
 
-        # pass msg to handler
-        # XXX: don't pass transport errors
-        $self->event( message => $m );
+            $self->event( message => $m );
+        }
     }
-
 }
 
 sub _handle_encrypted
@@ -708,8 +819,9 @@ sub _handle_encrypted
 
     AE::log trace => "recvd ". length($data) ." bytes encrypted\n";
 
+    #XXX: should be handled earlier
     if (length($data) == 4) {
-        $self->_handle_error($data);
+        $self->_handle_error(unpack("l<", $data));
     }
 
     my $authkey = substr($data, 0, 8);
@@ -735,17 +847,18 @@ sub _ack
 
     my $ack = MTProto::MsgsAck->new( msg_ids => \@msg_ids );
     #$ack->{msg_ids} = \@msg_ids;
-    $self->send( [$ack, undef, 1] );
+    $self->_real_send( [$ack, undef, 1] );
 }
 
 ## resend message by id, if it's pending (was not ACKed)
-sub resend
+sub _resend
 {
     my ($self, $id) = @_;
 
     if (exists $self->{_pending}{$id}){
-        AE::log trace => "resending $id";
-        $self->send( $self->{_pending}{$id} );
+        AE::log debug => "resending $id";
+        $self->_real_send( $self->{_pending}{$id} );
+        delete $self->{_pending}{$id};
     }
 }
 

@@ -5,23 +5,22 @@ package CliTg;
 use base "CLI::Framework";
 
 use Carp;
-use Config::Tiny;
-use Storable qw( store retrieve freeze thaw );
 use Encode ':all';
 
 use AnyEvent::Impl::Perl;
 use AnyEvent;
 use AnyEvent::Log;
 
-use Telegram;
-use Teleperl::Util qw(:DEFAULT get_AE_log_format_cb);
+use Teleperl;
+use Teleperl::Storage;
 
+use Teleperl::Util qw(:DEFAULT get_AE_log_format_cb);
 use Data::Dumper;
 
 sub settable_opts {
     [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
     [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log'    ],
-    [ 'session=s'   => 'name of session data save file', { default => 'session.dat'} ],
+    [ 'session=s'   => 'name of session data save dir', { default => '.'} ],
 }
 
 sub option_spec {
@@ -29,6 +28,7 @@ sub option_spec {
     [ 'encoding=s'  => 'if your console is not in UTF-8'    ],
     [ 'noupdate!'   => 'pass noupdate to Telegram->new'     ],
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
+    [ 'offline!'    => 'dont update account status', { default => 0 } ],
 }
 
 sub init {
@@ -37,16 +37,12 @@ sub init {
     $app->set_current_command('help') if $opts->{help};
 
     $app->cache->set( 'verbose' => $opts->{verbose} );
-    $app->cache->set( 'session' => $opts->{session} );
     $app->cache->set( 'debug'   => $opts->{debug} );
 
     # XXX do validate
     $app->cache->set('encoding' => Encode::find_encoding($opts->{encoding}))
         if $opts->{encoding};
 
-    my $session = retrieve( $opts->session ) if -e $opts->session;
-    my $conf = Config::Tiny->read($opts->config);
-    
     $Data::Dumper::Indent = 1;
     $AnyEvent::Log::FILTER->level(
         $opts->{debug} ? ($opts->{debug}>1 ? "trace" : "debug") :
@@ -56,24 +52,26 @@ sub init {
     install_AE_log_SIG_WARN();
     install_AE_log_crutch();
 
-    my $tg = Telegram->new(
-        dc => $conf->{dc},
-        app => $conf->{app},
-        proxy => $conf->{proxy},
-        session => $session,
-        reconnect => 1,
-        keepalive => 1,
-        noupdate => $opts->{noupdate} || !defined($session),
-        on_auth => sub { $app->render("Server error $_[0] $_[1], forgot `auth` command?\n") },
-        debug => $opts->{debug}
+    my $stor = Teleperl::Storage->new( dir => $opts->{session} );
+    $app->cache->set( 'storage' => $stor );
+    my $tg = Teleperl->new( storage => $stor, online => !$opts->{offline}, autofetch => 1 );
+
+    $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
+    $tg->reg_cb( fetch => sub { 
+            shift;
+            my %res = @_;
+            if ( defined $res{error} ) {
+                $app->render( "file fetch failed with error: $res{error}\n" );
+            }
+            else {
+                $app->render( "file $res{name}, size $res{size} fetched\n");
+            }
+        }
     );
-    $tg->{on_update} = sub {
-        $app->report_update(@_);
-    };
+    $tg->reg_cb( error => sub { AE::log error => "@_"; } );
     $tg->start;
     #$tg->update;
 
-    $app->cache->set( 'conf' => $conf );
     $app->cache->set( 'tg' => $tg );
     $app->cache->set( 'argobject' => [] );
 
@@ -105,6 +103,7 @@ sub command_map
     updates     => 'CliTg::Command::Updates',
     users       => 'CliTg::Command::Users',
     config      => 'CliTg::Command::Config',
+    auth        => 'CliTg::Command::Auth',
  
     # built-in commands:
     help    => 'CLI::Framework::Command::Help',
@@ -247,55 +246,6 @@ sub menu_txt {
 
     return "" if $suppress;
     return $self->SUPER::menu_txt();
-}
-
-package CliTg::Command::Auth;
-use base "CLI::Framework::Command::Meta";
-
-use Data::Dumper;
-
-sub validate
-{
-    my ($self, $opts, @args) = @_;
-    die "must be one argument or no args" unless @args < 2;
-}
-
-sub run
-{
-    my ($self, $opts, $code) = @_;
-    my $tg = $self->cache->get('tg');
-    my $app =$self->get_app;
-    my $conf = $self->cache->get('conf');
-
-    $tg->auth(
-        defined $code
-    	  ? (code    => $code)
-          : (phone   => $conf->{user}{phone}),
-        cb  => sub {
-            my $res = shift;
-
-            if ($res->isa('Telegram::Auth::SentCode')) {
-                $app->render("code sent:\n"
-                     . join("\n",
-                         map {
-                             my $class = ref $res->{$_};
-                             $class =~ s/Telegram::Auth:://;
-                             sprintf("%-17s:\t%s", $_, $class || $res->{$_});
-                         }
-                         grep { $_ ne 'flags' }
-                         keys %$res)
-                     . "\n"
-                     . "Use `auth <code>` command to enter it and finish login.\n"
-                );
-            }
-            elsif ($res->isa('Telegram::Auth::Authorization')) {
-                $app->render("Auth OK! Restart to enable updates, if you want");
-            }
-            else {
-                $app->render("unknown auth response " . Dumper($res));
-            }
-        }
-    );
 }
 
 package CliTg::Command::Message;
@@ -507,7 +457,8 @@ sub handle_dialogs
                     offset_date => $ds->{messages}[-1]{date},
                     offset_peer => Telegram::InputPeerEmpty->new,
                     #    offset_peer => $ipeer,
-                    limit => -1
+                    limit => -1,
+                    hash => 0
                 ),
                 sub { handle_dialogs($tg, $count, $say, @_) }
             ) if ($count < $ds->{count});
@@ -525,7 +476,8 @@ sub run
             offset_id => $offset // 0,
             offset_date => 0,
             offset_peer => Telegram::InputPeerEmpty->new,
-            limit => $limit // -1
+            limit => $limit // -1,
+            hash => 0
         ),
         sub {
             handle_dialogs(
@@ -1401,6 +1353,70 @@ sub run
     my $tg = $self->cache->get('tg');
 
     $tg->invoke( Telegram::Help::GetConfig->new, sub { $self->get_app->render(Dumper @_) } );
+}
+
+package CliTg::Command::Auth;
+use base "CLI::Framework::Command";
+
+sub option_spec {
+    [ "mode", 'hidden' => { one_of => [
+                ["phone=i", 'phone'],
+                ["code=i", 'auth code'],
+                ["pass=s", 'auth passwd']
+            ]}
+    ],
+    ["first_name=s", "user's first name, optional"],
+    ["last_name=s", "user's last name, optional"],
+}
+
+sub run
+{
+    my ($self, $options, @args) = @_;
+    my $tg = $self->cache->get('tg');
+    
+    if (defined $options->{phone}) {
+        $tg->auth( phone => $options->{phone}, cb => sub {
+
+            my %res = @_;
+
+            if (defined $res{sent}) {
+                say 'phone '.($res{registered} ? '' : 'un').'registered';
+                say 'Code sent, type: '.$res{sent};
+            }
+            elsif (defined $res{error}) {
+                say "Error $res{error}";
+            }
+
+        } );
+    }
+
+    if (defined $options->{code}) {
+        $tg->auth( code => $options->{code}, cb => sub {
+
+            my %res = @_;
+
+            if (defined $res{auth}) {
+                say 'Success'
+            }
+            elsif (defined $res{error}) {
+                say "Error $res{error}"
+            }
+
+        } );
+    }
+
+    if (defined $options->{pass}) {
+        $tg->auth( passwd => $options->{pass}, cb => sub {
+            my %res = @_;
+
+            if (defined $res{auth}) {
+                say 'Success'
+            }
+            elsif (defined $res{error}) {
+                say "Error $res{error}"
+            }
+        } );
+    }
 }
 
 1;
