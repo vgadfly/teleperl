@@ -18,6 +18,7 @@ use Teleperl::Storage;
 use base 'Class::Event';
 
 use AnyEvent;
+use Data::DPath 'dpath';
 use Data::Dumper;
 
 use Telegram::Help::GetConfig;
@@ -39,6 +40,8 @@ use Telegram::Peer;
 use Telegram::InputFileLocation;
 use Telegram::Upload::GetFile;
 
+use constant ROTTEN_SESSION_TIMEOUT => 864000;  # TODO dynamically by future_salts
+
 sub new
 {
     my ($self, %arg) = @_;
@@ -55,13 +58,21 @@ sub new
     my $storage = $arg{storage};
     $self->{_storage} = $storage;
 
-    $self->{_config} = $storage->config;
+    $self->{_config} = $storage->get(session => '/config');
+    $self->{home_dc} = $storage->get(session => '/home_dc');
 
-    $self->{_upd} = Teleperl::UpdateManager->new( $new_session ? {} : $storage->upd_state );
-    $self->{_cache} = Teleperl::PeerCache->new( session => $storage->peer_cache );
+    $self->{_upd} = Teleperl::UpdateManager->new( $new_session ? {} : $storage->get('update_state') );
+    $self->{_cache} = Teleperl::PeerCache->new( session => $storage->get('cache') );
     $self->{_storage} = $storage;
 
-    $self->{_tg} = $self->_spawn_tg( $self->{_config}{home_dc} // 0, 1 );
+    # purge senile sessions
+    my $sesspace = $storage->get('session');
+    for my $dc (keys %{ $sesspace->{sessions} }) {
+        my $sdc = $sesspace->{sessions}->{$dc};
+        $sdc = [ grep { ($_->{time}//0) > time() - ROTTEN_SESSION_TIMEOUT } @$sdc ];
+    }
+
+    $self->{_tg} = $self->_spawn_tg( $self->{home_dc} // 0, 1 );
     
     $self->{_upd}->reg_cb( query => sub { shift; $self->invoke(@_) } );
     $self->{_upd}->reg_cb( cache => sub { shift; $self->{_cache}->cache(@_) } );
@@ -75,6 +86,26 @@ sub new
 
     $self->{_file_part_size} = 2 ** 19;
     $self->{autofetch} = $arg{autofetch} // 0;
+    $self->{noupdate} = $arg{noupdate} // 0;
+
+    # example of filters XXX TODO should think of chaining filters e.g. to capture page id
+    if ($self->{autofetch} > 1) {
+        $self->register_filter_event('update',
+            webpage_photo   => "//.[isa('Telegram::WebPage')]//.[isa('Telegram::Photo')]"
+        );
+        $self->register_filter_event('update',
+            webpage_document=> "//.[isa('Telegram::WebPage')]//.[isa('Telegram::Document')]"
+        );
+        $self->reg_cb( update_webpage_photo => sub {
+            shift;
+            $self->_handle_photo( webpage => 1, @_ );
+        } );
+        $self->reg_cb( update_webpage_document => sub {
+            shift;
+            $self->_handle_document( webpage => 1, @_ );
+        } );
+    }
+
     return $self;
 }
 
@@ -91,14 +122,17 @@ sub start
                     my $config = shift;
                     if ( $config->isa('Telegram::Config') ) {
                         # assume this is home dc
-                        $self->{_config}{home_dc} = $config->{this_dc}
-                            unless defined $self->{_config}{home_dc};
-                        # save auth
-                        unless ( $self->{_storage}->mt_auth->{$config->{this_dc}} ) {
-                            $self->{_storage}->mt_auth->{$config->{this_dc}} = 
-                                $self->{_tg}{auth};
+                        unless (defined $self->{home_dc}) {
+                            $self->{home_dc} = $config->{this_dc};
+                            # save session
+                            $self->{_storage}->get("session")->{home_dc} = $self->{home_dc};
                         }
-                        $self->{_config}{config} = $config 
+                        # save auth
+                        my $authdc = $self->{_storage}->get(auth => "/dc/$config->{this_dc}");
+                        unless ( $authdc ) {
+                            $authdc = $self->{_tg}{authdc};
+                        }
+                        $self->{_config} = $config;
                     }
                 }
             );
@@ -112,10 +146,10 @@ sub _spawn_tg
 
     AE::log debug => "spawn new Telegram for DC#$dc%s", $main ? " as main" : "";
 
-    my %param = $self->{_storage}->tg_param;
+    my %param = %{ $self->{_storage}->get('config') };
 
     if ($dc) {
-        my @options = grep { $_->{id} == $dc } @{$self->{_config}{config}{dc_options}};
+        my @options = grep { $_->{id} == $dc } @{$self->{_config}{dc_options}};
 
         if (defined $param{proxy}) {
             @options = grep { defined $_->{static} } @options;
@@ -129,20 +163,34 @@ sub _spawn_tg
         $param{dc}{port} = $options[0]{port};
     }
 
-    my $dc_auth = $dc ? $self->{_storage}->mt_auth->{$dc} : {};
+    my $dc_auth = $dc ? $self->{_storage}->get(auth => "/dc/$dc") : {};
     unless (defined $dc_auth) {
-        $self->{_storage}->mt_auth->{$dc} = $dc_auth = {};
+        my $adc = $self->{_storage}->get(auth => "/dc");
+        $adc->{$dc} = $dc_auth = {};
     }
+    my $main_sid = $self->{_storage}->get(session => '/main_session_id');
+    my $dc_sessi = $self->{_storage}->get(session => "/sessions/$dc");
+    my $session = (grep { $main ? ($_->{id} eq $main_sid) : 1 } @$dc_sessi)[0];
+    $session = {} unless $session;
+    # TODO full-fledged session manager instead of one (first) per-dc session
+
     my $tg = Telegram->new( %param,
         force_new_session => $self->{_force_new_session},
         keepalive => 1,
-        auth => $dc_auth,
-        session => ($main and $dc) ? $self->{_storage}->mt_session : {}
+        authdc => $dc_auth,
+        session => $session,
+        noupdate => (!$main or $self->{noupdate}),
     );
     
     if ($main) {
         $tg->reg_cb( new_session => sub { $self->{_upd}->sync } );
         $tg->reg_cb( connected => sub {
+                my $sesspace =  $self->{_storage}->get('session');
+                if (not defined $sesspace->{main_session_id}) {
+                    $sesspace->{main_session_id} = $session->{id};
+                    push @$dc_sessi, $session
+                        unless grep { $_->{id} eq $session->{id} } @$dc_sessi;
+                }
                 AE::log info => "connected";
                 $self->{_upd}->sync
         });
@@ -157,6 +205,9 @@ sub _spawn_tg
 
         $tg->reg_cb( migrate => sub { shift; $self->_migrate(@_) } );
     }
+    else {
+        push @$dc_sessi, $session unless defined $session->{id};
+    }
     return $tg;
 }
 
@@ -166,21 +217,52 @@ sub _migrate
 
     undef $self->{_tg};
 
-    unless ( defined $self->{_config}{config} ) {
+    unless ( defined $self->{_config} ) {
         AE::log error => "forced to migrate to $dc, but no config";
         $self->event( error => { error_message => "Nowhere to migrate" } );
         return;
     }
-    $self->{_config}{home_dc} = $dc;
+    $self->{home_dc} = $dc;
+    $self->{_storage}->get("session")->{home_dc} = $self->{home_dc};
     $self->{_tg} = $self->_spawn_tg( $dc, 1 );
     $self->{_tg}->start;
     $self->{_tg}->invoke( $req->{query}, $req->{cb} );
+}
+
+## process filters from specified table and emit events
+sub _run_filters
+{
+    my ($self, $table, $data) = @_;
+
+    for my $rule ($self->{_filters}{$table}) {
+        if (my @res = $rule->{filter}->match($data)) {
+            $self->event( $table . '_' . $rule->{name}, @res );
+        }
+    }
+}
+
+## allow user add new filters to table
+sub register_filter_event {
+    my ($self, $table, $evname, $expression) = @_;
+
+    # XXX TODO support more tables?
+    die "unsupported filter table"
+        unless grep { $table eq $_ } ('raw', 'update');
+
+    push @{ $self->{_filters}{$table} }, +{
+            name    => $evname,
+            filter  => dpath($expression),
+        };
 }
 
 sub _handle_update
 {
     my ($self, $update) = @_;
 
+    # fix this shit to always be uniform full Telegram::Message before
+    # handling, if it is not yet XXX TODO wtf UpdateShortSentMessage ?! docs:
+    # 'chat has to be EXTRACTED FROM THE METHOD CALL THAT RETURNED THIS OBJECT'
+    # so not here?.. >_<
     if ( $update->isa('Telegram::UpdateNewMessage') or
          $update->isa('Telegram::UpdateNewChannelMessage')
     ) {
@@ -219,6 +301,7 @@ sub _handle_update
 
     AE::log trace => "update: ". Dumper($update);
 
+    $self->_run_filters(update => $update);
 }
 
 sub _handle_message
@@ -230,45 +313,59 @@ sub _handle_message
     if ( $self->{autofetch} and defined $mesg->{media} ) {
         if ( $mesg->{media}->isa('Telegram::MessageMediaDocument') ) {
             my $doc = $mesg->{media}{document};
-            my $filename = $self->{_storage}{files};
-            $filename .= $doc->{dc_id} .'_'. $doc->{id};
-
-            $self->fetch_file(
-                dst => $filename,
-                type => 'doc',
-                dc => $doc->{dc_id},
-                id => $doc->{id},
-                reference => $doc->{file_reference},
-                access_hash => $doc->{access_hash},
-                cb => sub {
-                    $self->event( 'fetch', msg_id => $mesg->{id}, name => $filename, @_ )
-                }
-            );
+            $self->_handle_document($doc, msg_id => $mesg->{id});
         }
         elsif ( $mesg->{media}->isa('Telegram::MessageMediaPhoto') ) {
             my $photo = $mesg->{media}{photo};
-            for my $sz ( @{$photo->{sizes}} ) {
-                my $filename = $self->{_storage}{files};
-                $filename .= $self->{_config}{home_dc} .'_'. $photo->{id};
-                $filename .= '_'. $sz->{w} .'x'. $sz->{h};
-                
-                $self->fetch_file(
-                    dst => $filename,
-                    type => 'file',
-                    dc => $sz->{location}{dc_id},
-                    volume_id => $sz->{location}{volume_id},
-                    local_id => $sz->{location}{local_id},
-                    secret => $sz->{location}{secret},
-                    reference => $sz->{location}{file_reference},
-                    access_hash => $photo->{access_hash},
-                    cb => sub {
-                        $self->event( 'fetch', msg_id => $mesg->{id}, name => $filename, @_ )
-                    }
-                );
-            }
+            $self->_handle_photo($photo, msg_id => $mesg->{id} );
         }
     }
     AE::log trace => "message: ". Dumper($mesg);
+}
+
+sub _handle_document
+{
+    my ($self, $doc, %param) = @_;
+
+    my $filename = $self->{_storage}{files};
+    $filename .= $doc->{dc_id} .'_'. $doc->{id};
+
+    $self->fetch_file(
+        dst => $filename,
+        type => 'doc',
+        dc => $doc->{dc_id},
+        id => $doc->{id},
+        reference => $doc->{file_reference},
+        access_hash => $doc->{access_hash},
+        cb => sub {
+            $self->event( 'fetch', name => $filename, %param, @_ )
+        }
+    );
+}
+
+sub _handle_photo
+{
+    my ($self, $photo, %param) = @_;
+
+    for my $sz ( @{$photo->{sizes}} ) {
+        my $filename = $self->{_storage}{files};
+        $filename .= $self->{_config}{home_dc} .'_'. $photo->{id};
+        $filename .= '_'. $sz->{w} .'x'. $sz->{h};
+
+        $self->fetch_file(
+            dst => $filename,
+            type => 'file',
+            dc => $sz->{location}{dc_id},
+            volume_id => $sz->{location}{volume_id},
+            local_id => $sz->{location}{local_id},
+            secret => $sz->{location}{secret},
+            reference => $sz->{location}{file_reference},
+            access_hash => $photo->{access_hash},
+            cb => sub {
+                $self->event( 'fetch', name => $filename, %param, @_ )
+            }
+        );
+    }
 }
 
 sub _recursive_input_access_fix
@@ -292,15 +389,18 @@ sub _recursive_input_access_fix
     return 1;
 }
 
+# when fix_input option is set to 1 access_hash from peer cache
+# is added recursively to every InputPeer
 sub invoke
 {
     my ($self, $query, $cb, %param) = @_;
 
-    my $fix_input = $param{fix_input} // 0;
+    my $fix_input = delete($param{fix_input}) // 0;
     if ($fix_input) {
         $self->_recursive_input_access_fix($query) or return;
     }
-    $self->{_tg}->invoke($query, $cb);
+    # XXX delete noqueue (don't allow it for user) here?
+    $self->{_tg}->invoke($query, $cb, %param);
 }
 
 sub auth
@@ -309,7 +409,7 @@ sub auth
 
     if ($arg{phone}) {
         $self->{_phone} = $arg{phone};
-        my %param = $self->{_storage}->tg_param;
+        my %param = %{ $self->{_storage}->get('config') };
         $self->{_tg}->invoke(
             Telegram::Auth::SendCode->new(
                 phone_number => $arg{phone},
@@ -332,7 +432,7 @@ sub auth
                     $arg{cb}->(error => 'UNKNOWN') if defined $arg{cb};
                 }
             },
-            1
+            noqueue => 1
         );
     }
     elsif ($arg{code}) {
@@ -356,7 +456,7 @@ sub auth
                         say Dumper $res;
                     }
                 },
-                1
+                noqueue => 1
             );
         }
         else {
@@ -387,7 +487,7 @@ sub auth
                         say Dumper $res;
                     }
                 },
-                1
+                noqueue => 1
             );
         }
     }
@@ -427,10 +527,10 @@ sub auth
                             say Dumper $res;
                         }
                     },
-                    1
+                    noqueue => 1
                 );
             },
-            1
+            noqueue => 1
         );
     }
 }
@@ -461,8 +561,8 @@ sub fetch_file
 
     my $roam = $self->_spawn_tg( $file{dc}, 0 );
     $roam->start;
-
-    if ( $file{dc} != $self->{_config}{home_dc} ) {
+    # TODO use cached exported auth and reuse by session manager instead of $roam
+    if ( $file{dc} != $self->{home_dc} ) {
         $self->{_tg}->invoke( 
             Telegram::Auth::ExportAuthorization->new( dc_id => $file{dc} ),
             sub {
@@ -471,6 +571,8 @@ sub fetch_file
                     $file{cb}->( error => $auth->{error_message} );
                 }
                 else {
+                    my $adc = $self->{_storage}-get(auth => "/dc");
+                    $adc->{$file{dc}}->{exported} = $auth;
                     $roam->invoke(
                         Telegram::Auth::ImportAuthorization->new(
                             id => $auth->{id},
@@ -517,6 +619,7 @@ sub _fetch_file
     }
     my $file;
     open( $file, '>', $file{dst} );
+    binmode $file;
     $self->_fetch_file_part( $file, $tg, $loc, 0, 0, $file{cb} );
 }
 
@@ -596,8 +699,6 @@ sub send_text_message
             $arg{$_} ? ( $_ => $arg{$_} ) : ()
         } qw(no_webpage silent background clear_draft reply_to_msg_id entities)
     );
-    my $users = $self->{session}{users};
-    my $chats = $self->{session}{chats};
 
     $msg->{message} = $arg{message};    # TODO check utf8
     $msg->{random_id} = int(rand(65536));
