@@ -28,8 +28,8 @@ sub install_AE_log_crutch
         AnyEvent::Log::_log
           $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
           $_[0],
-          map { is_utf8($_) ? encode_utf8 $_ : $_ } ( # TODO fix uninit from top level
-               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
+          map { is_utf8($_) ? encode_utf8 $_ : $_ } (
+               (split(/::/, (caller(1))[3]//':: '))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
                (@_ > 2 ? @_[2..$#_] : ())
           );
     };
@@ -38,7 +38,7 @@ sub install_AE_log_crutch
           $AnyEvent::Log::CTX{ (caller)[0] } ||= AnyEvent::Log::_pkg_ctx +(caller)[0],
           $_[0],
           map { is_utf8($_) ? encode_utf8 $_ : $_ } (
-               (split(/::/, (caller(1))[3]))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
+               (split(/::/, (caller(1))[3]//':: '))[-1] . ':' . (caller(0))[2] . ": " . $_[1],
                (@_ > 2 ? @_[2..$#_] : ())
           );
     };
