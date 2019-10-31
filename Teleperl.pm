@@ -619,6 +619,7 @@ sub _fetch_file
     }
     my $file;
     open( $file, '>', $file{dst} );
+    binmode $file;
     $self->_fetch_file_part( $file, $tg, $loc, 0, 0, $file{cb} );
 }
 
