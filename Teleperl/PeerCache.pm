@@ -2,7 +2,7 @@ use Modern::Perl;
 
 package Teleperl::PeerCache;
 
-use AnyEvent; # for log
+use AnyEvent::Log;
 
 sub new
 {
