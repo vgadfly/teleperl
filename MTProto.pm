@@ -110,68 +110,18 @@ use MTProto::MsgsAck;
 use MTProto::DestroySession;
 
 use TeleCrypt::Keys;
-
-sub aes_ige_enc
-{
-    my ($plain, $key, $iv) = @_;
-    my $aes = Crypt::OpenSSL::AES->new( $key );
-
-    my $iv_c = substr( $iv, 0, 16 );
-    my $iv_p = substr( $iv, 16, 16 );
-
-    my $cypher = '';
-
-    for (my $i = 0; $i < length($plain); $i += 16){
-        my $m = substr($plain, $i, 16);
-        my $c = $aes->encrypt( $iv_c ^ $m ) ^ $iv_p;
-
-        $iv_p = $m;
-        $iv_c = $c;
-
-        $cypher .= $c;
-    }
-
-    return $cypher;
-}
-
-sub aes_ige_dec
-{
-    my ($cypher, $key, $iv) = @_;
-    my $aes = Crypt::OpenSSL::AES->new( $key );
-
-    my $iv_c = substr( $iv, 0, 16 );
-    my $iv_p = substr( $iv, 16, 16 );
-
-    my $plain = '';
-
-    for (my $i = 0; $i < length($cypher); $i += 16){
-        my $c = substr($cypher, $i, 16);
-        my $m = $aes->decrypt( $iv_p ^ $c ) ^ $iv_c;
-
-        $iv_p = $m;
-        $iv_c = $c;
-
-        $plain .= $m;
-    }
-
-    return $plain;
-}
+use TeleCrypt::AES;
 
 sub gen_msg_key
 {
     my ($self, $plain, $x) = @_;
-    my $msg_key = substr( sha256(substr($self->{dcinstance}{permkey}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
-    return $msg_key;
+    return TeleCrypt::AES::gen_msg_key($self->{dcinstance}{permkey}{auth_key}, $plain, $x);
 }
 
 sub gen_aes_key
 {
     my ($self, $msg_key, $x) = @_;
-    my $sha_a = sha256( $msg_key . substr($self->{dcinstance}{permkey}{auth_key}, $x, 36) );
-    my $sha_b = sha256( substr($self->{dcinstance}{permkey}{auth_key}, 40+$x, 36) . $msg_key );
-    my $aes_key = substr($sha_a, 0, 8) . substr($sha_b, 8, 16) . substr($sha_a, 24, 8);
-    my $aes_iv = substr($sha_b, 0, 8) . substr($sha_a, 8, 16) . substr($sha_b, 24, 8);
-    return ($aes_key, $aes_iv);
+    return (TeleCrypt::AES::gen_aes_key($self->{dcinstance}{permkey}{auth_key}, $msg_key, $x));
 }
 
 
