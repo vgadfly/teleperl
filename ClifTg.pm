@@ -19,12 +19,13 @@ use Data::Dumper;
 
 sub settable_opts {
     [ 'verbose|v!'  => 'be verbose, by default also influences logger'      ],
-    [ 'debug|d:+'   => 'pass debug (2=trace) to Telegram->new & AE::log'    ],
-    [ 'session=s'   => 'name of session data save dir', { default => '.'} ],
+    [ 'debug|d:+'   => 'pass debug (2=trace) to Teleperl->new & AE::log'    ],
+    [ 'autofetch!'  => 'automatically download files from messages'         ],
 }
 
 sub option_spec {
     &settable_opts(),
+    [ 'session=s'   => 'name of session data save dir', { default => '.'} ],
     [ 'encoding=s'  => 'if your console is not in UTF-8'    ],
     [ 'noupdate!'   => 'pass noupdate to Telegram->new'     ],
     [ 'config|c=s'  => 'name of configuration file', { default => "teleperl.conf" } ],
@@ -52,9 +53,18 @@ sub init {
     install_AE_log_SIG_WARN();
     install_AE_log_crutch();
 
-    my $stor = Teleperl::Storage->new( dir => $opts->{session} );
+    my $stor = Teleperl::Storage->new(
+        dir         => $opts->{session}.
+        configfile  => $opts->config
+    );
     $app->cache->set( 'storage' => $stor );
-    my $tg = Teleperl->new( storage => $stor, online => !$opts->{offline}, autofetch => 1 );
+    my $tg = Teleperl->new(
+        storage     => $stor,
+        online      => !$opts->{offline},
+        noupdate    => $opts->{noupdate},
+        autofetch   => $opts->{autofetch},
+        debug       => $opts->{debug},      # for future use...
+    );
 
     $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
     $tg->reg_cb( fetch => sub { 
@@ -360,9 +370,13 @@ sub run
         $ret .= "verbose is set to $opts->{verbose}\n";
     }
 
-    if ($opts->{session} ne $app->cache->get('session')) {
-        $app->cache->set( 'session' => $opts->{session} );
-        $ret .= "session is set to $opts->{session}\n";
+    $AnyEvent::Log::FILTER->level(
+        $opts->{debug} ? ($opts->{debug}>1 ? "trace" : "debug") :
+            $opts->{verbose} ? "info" : "note");
+
+    if ($opts->{autofetch} ne $tg->{autofetch}) {
+        $tg->{autofetch} = $opts->{autofetch};
+        $ret .= "autofetch is set to $opts->{autofetch}\n";
     }
 
     return $ret || "no opts changed";
@@ -547,12 +561,13 @@ sub run
 {
     my ($self, $opts, $peer, $msg) = @_;
     my $tg = $self->cache->get('tg');
+    my $update_state = $self->cache->get('storage')->get('update_state');
 
     $tg->invoke( Telegram::Updates::GetState->new, sub {
             $self->get_app->render(Dumper @_);
-            $tg->{session}{update_state}{date} = $_[0]->{date};
-            $tg->{session}{update_state}{pts} = $_[0]->{pts};
-            $tg->{session}{update_state}{seq} = $_[0]->{seq};
+            $update_state->{date} = $_[0]->{date};
+            $update_state->{pts} = $_[0]->{pts};
+            $update_state->{seq} = $_[0]->{seq};
         });
     
     #$tg->invoke( Telegram::Updates::GetDifference->new(

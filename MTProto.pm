@@ -69,7 +69,7 @@ use Data::Dumper;
 
 use base 'Class::Stateful';
 use fields qw( 
-    session keys noack _timeshift
+    session dcinstance noack _timeshift
     _lock _pending _tcp_first _aeh _pq _queue _wsz _rtt_ack _rtt _ma_pool 
 );
 
@@ -160,15 +160,15 @@ sub aes_ige_dec
 sub gen_msg_key
 {
     my ($self, $plain, $x) = @_;
-    my $msg_key = substr( sha256(substr($self->{keys}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
+    my $msg_key = substr( sha256(substr($self->{dcinstance}{permkey}{auth_key}, 88+$x, 32) . $plain), 8, 16 );
     return $msg_key;
 }
 
 sub gen_aes_key
 {
     my ($self, $msg_key, $x) = @_;
-    my $sha_a = sha256( $msg_key . substr($self->{keys}{auth_key}, $x, 36) );
-    my $sha_b = sha256( substr($self->{keys}{auth_key}, 40+$x, 36) . $msg_key );
+    my $sha_a = sha256( $msg_key . substr($self->{dcinstance}{permkey}{auth_key}, $x, 36) );
+    my $sha_b = sha256( substr($self->{dcinstance}{permkey}{auth_key}, 40+$x, 36) . $msg_key );
     my $aes_key = substr($sha_a, 0, 8) . substr($sha_b, 8, 16) . substr($sha_a, 24, 8);
     my $aes_iv = substr($sha_b, 0, 8) . substr($sha_a, 8, 16) . substr($sha_b, 24, 8);
     return ($aes_key, $aes_iv);
@@ -177,7 +177,7 @@ sub gen_aes_key
 
 sub new
 {
-    my @args = qw(keys session noack);
+    my @args = qw(dcinstance session noack);
     my ($class, %arg) = @_;
     
     my $self = fields::new( ref $class || $class );
@@ -269,7 +269,20 @@ sub start_session
         $self->{session}{seq} = 0;
     }
 
-    return $self->_state('session_ok') if defined $self->{keys}{auth_key};
+    if (defined $self->{dcinstance}{permkey}{auth_key}) {
+        my $fs = $self->{dcinstance}{future_salts};
+        if (defined $fs and $fs->isa('MTProto::FutureSalts')) {
+            for my $fusalt (@{ $fs->{salts} }) {
+                if ($fusalt->{valid_since} < AE::now and
+                    $fusalt->{valid_until} > AE::now
+                ) {
+                    $self->{dcinstance}{salt} = pack "Q<", $fusalt->{salt};
+                    last;
+                }
+            }
+        }
+        return $self->_state('session_ok');
+    }
 
     $self->_state('phase_one');
 
@@ -436,7 +449,7 @@ sub _phase_two
     $dh_par->{encrypted_data} = $enc_data;
 
     # session auth key
-    $self->{keys}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
+    $self->{dcinstance}{permkey}{auth_key} = $g_a->mod_exp( $b, $p, $bn_ctx )->to_bin;
 
     $self->_state('phase_three');
     $self->_send_plain( pack( "(a4)*", $dh_par->pack ) );
@@ -455,7 +468,7 @@ sub _phase_three
     my $nonce = $self->{_pq}{nonce};
     my $new_nonce = $self->{_pq}{new_nonce};
     my $server_nonce = $self->{_pq}{server_nonce};
-    my $auth_key = $self->{keys}{auth_key};
+    my $auth_key = $self->{dcinstance}{permkey}{auth_key};
     
     my @stream = unpack( "(a4)*", $data );
     return $self->_fatal('no data on phase three') unless @stream;
@@ -477,9 +490,9 @@ sub _phase_three
 
     AE::log debug => "session started";
 
-    $self->{keys}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
-    $self->{keys}{auth_key_id} = $auth_key_hash;
-    $self->{keys}{auth_key_aux} = $auth_key_aux_hash;
+    $self->{dcinstance}{salt} = substr($new_nonce->to_bin, 0, 8) ^ substr($server_nonce->to_bin, 0, 8);
+    $self->{dcinstance}{permkey}{auth_key_id} = $auth_key_hash;
+    $self->{dcinstance}{permkey}{auth_key_aux} = $auth_key_aux_hash;
     
     # ecrypted connection established
     delete $self->{_pq};
@@ -493,6 +506,7 @@ sub _phase_three
 sub _recv_msg
 {
     my $self = shift;
+    $self->{session}{time} = int(AE::now);  # need not be accurate
     $self->_stateful('_', @_);
 }
 
@@ -611,18 +625,19 @@ sub _real_send
     my $pad = Crypt::OpenSSL::Random::random_pseudo_bytes( 
         -(12+length($message->{data})) % 16 + 12 );
 
-    my $plain = $self->{keys}{salt} . $self->{session}{id} . $payload . $pad;
+    my $plain = $self->{dcinstance}{salt} . $self->{session}{id} . $payload . $pad;
 
     my $msg_key = $self->gen_msg_key( $plain, 0 );
     my ($aes_key, $aes_iv) = $self->gen_aes_key( $msg_key, 0 );
     my $enc_data = aes_ige_enc( $plain, $aes_key, $aes_iv );
 
-    my $packet = $self->{keys}{auth_key_id} . $msg_key . $enc_data;
+    my $packet = $self->{dcinstance}{permkey}{auth_key_id} . $msg_key . $enc_data;
 
     AE::log debug => "sending $message->{seq}:$message->{msg_id} ".
         "(".ref($message->{object})."), ".
         length($packet). " bytes encrypted\n";
     $self->{_aeh}->push_write( pack("L<", length($packet)) . $packet );
+    $id_cb->($msgid, 'push') if defined $id_cb;
     $msg->[3] = time;
     # XXX
     AnyEvent->now_update;
@@ -689,7 +704,7 @@ sub _handle_ack
         $self->{_wsz} *= 2;
         $self->{_rtt_ack} = $self->{_wsz};
     }
-    $self->{_pending}{$msgid}[1]->($msgid) if defined $self->{_pending}{$msgid}[1];
+    $self->{_pending}{$msgid}[1]->($msgid, 'ack') if defined $self->{_pending}{$msgid}[1];
     delete $self->{_pending}{$msgid};
 
     $self->_dequeue;
@@ -749,8 +764,9 @@ sub _handle_msg
             $self->_handle_ack($_) for @{$m->{object}{msg_ids}};
         }
         elsif ($m->{object}->isa('MTProto::BadServerSalt')) {
-            $self->{keys}{salt} = pack "Q<", $m->{object}{new_server_salt};
+            $self->{dcinstance}{salt} = pack "Q<", $m->{object}{new_server_salt};
             $self->_resend($m->{object}{bad_msg_id});
+            $self->event( "bad_salt" );
         }
         elsif ($m->{object}->isa('MTProto::BadMsgNotification')) {
             # sesssion not in sync: destroy and make new
@@ -860,6 +876,18 @@ sub _resend
         $self->_real_send( $self->{_pending}{$id} );
         delete $self->{_pending}{$id};
     }
+}
+
+sub rpc_drop_answer
+{
+    my ($self, $id) = @_;
+
+    # XXX TODO this interferes with ack mechanism, there are 3 cases
+    # on https://core.telegram.org/mtproto/service_messages
+#    if (exists $self->{_pending}{$id}){
+#        AE::log debug => "dropping $id";
+#        delete $self->{_pending}{$id};
+#    }
 }
 
 ## pack object and send it; return msg_id
