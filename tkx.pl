@@ -55,7 +55,7 @@ my $conf = Config::Tiny->read($opts->config);
 
 $Data::Dumper::Indent = 1;
 $AnyEvent::Log::FILTER->level(
-    $opts->{debug} > 0 ? "trace" :
+    $opts->debug//0 >1 ? "trace" :
         $opts->{debug} ? "debug" :
             $opts->{verbose} ? "info" : "note"
 );
@@ -63,10 +63,6 @@ $AnyEvent::Log::LOG->log_to_path($opts->logfile) if $opts->{logfile}; # XXX path
 
 # XXX workaround crutch of AE::log not handling utf8 & function name
 install_AE_log_crutch();
-
-# catch all non-our Perl's warns to log with stack trace
-install_AE_log_SIG_WARN();
-install_AE_log_SIG_DIE();
 
 my $tg = Telegram->new(
     dc => $conf->{dc},
@@ -93,6 +89,10 @@ if ($opts->{theme}) {
     die $@ . "\nAvailable theme names: " . Tkx::ttk__style_theme_names() . "\n"
         if $@;
 }
+# catch all non-our Perl's warns to log with stack trace
+install_AE_log_SIG_WARN();
+install_AE_log_SIG_DIE();
+
 Tkx::option_add("*tearOff", 0); # disable detachable GTK/Motif menus
 # use available in ActivePerl's tkkit.dll packages, but not all for now
 # e.g.: json ico img::xpm - do we need these?
@@ -109,7 +109,9 @@ my $sbLimit    = 10;    # value of Limit spinbox
 my $msgToSend = '';     # text in entry
 my $curNicklistId = 0;  # id of what is selected in listbox
 my $curSelMsgId = 0;    # id of selected msg in TreeView, for MarkRead
-my $lboxNicks = '{Surprised to see nick list on right?} LOL {This is old tradition in IRC and Jabber}';
+my $lboxNicks = '{Surprised to see} {nick list on right?} {} LOL {This is old tradition} {in IRC and Jabber}';
+my $cmbxTLFunc;         # name of selected TL function
+my @tlfunclist = sort map { $_->{func} } grep { exists $_->{func} and not exists $_->{bang} } values %Telegram::ObjTable::tl_type;
 my $logScrollEnd = 1;   # keep scrolling on adding
 my %messageStore;       # XXX refactor me!
 
@@ -118,7 +120,8 @@ $UI{mw}         = Tkx::widget->new("."); # main window
 
 # top and bottom labels & btns
 $UI{lblToolbar} = $UI{mw}->new_ttk__label( -text => "Here planned to be toolbar :)");
-$UI{sbLimit}    = $UI{mw}->new_tk__spinbox(-from => 1, -to => 9999, -width => 4, -textvariable => \$sbLimit);
+$UI{sbLimit}    = $UI{mw}->new_tk__spinbox(-from => 1, -to => 9999, -width => 4, -textvariable => \$sbLimit,
+    -validate => 'key', -validatecommand => [sub { $_[0] =~ /^\d+$/ ? 1 : 0 }, Tkx::Ev("%P")]);
 $UI{btGetHistor}= $UI{mw}->new_ttk__button(-text => "Get History", -command => \&btGetHistor);
 $UI{btGetDlgs}  = $UI{mw}->new_ttk__button(-text => "Get dialogs", -command => \&btGetDlgs);
 $UI{btCachUsers}= $UI{mw}->new_ttk__button(-text => "Cached users", -command => \&btCachUsers);
@@ -136,14 +139,23 @@ $UI{sizeGrip}   = $UI{mw}->new_ttk__sizegrip;
 # parts in frames
 $UI{panw}       = $UI{mw}->new_ttk__panedwindow(-orient => 'horizontal');
 $UI{frmNicklist}= $UI{panw}->new_ttk__frame();
-$UI{frmUpdates} = $UI{panw}->new_ttk__frame();
+$UI{panControl} = $UI{panw}->new_ttk__panedwindow(-orient => 'vertical');
 $UI{panMessages}= $UI{panw}->new_ttk__panedwindow(-orient => 'vertical');
+$UI{frmUpdates} = $UI{panControl}->new_ttk__frame();
+$UI{frmInvoke}  = $UI{panControl}->new_ttk__labelframe(-text => "API raw query constructor");
 $UI{frmMsgList} = $UI{panMessages}->new_ttk__frame();
 $UI{frmMessage} = $UI{panMessages}->new_ttk__frame();
 $UI{tvMsgList}  = $UI{frmMsgList}->new_ttk__treeview(-selectmode => "browse"); # setup others later
 $UI{sbhMsgList} = $UI{frmMsgList}->new_ttk__scrollbar(-command => [$UI{tvMsgList}, "xview"], -orient => "horizontal");
 $UI{sbvMsgList} = $UI{frmMsgList}->new_ttk__scrollbar(-command => [$UI{tvMsgList}, "yview"], -orient => "vertical");
-$UI{txtUpdates} = $UI{frmUpdates}->new_tk__text(-state => "disabled", -width => 39, -height => 43, -wrap => "char");
+$UI{cmbTLFunc}  = $UI{frmInvoke}->new_ttk__combobox(-state => "readonly", -textvariable => \$cmbxTLFunc,
+    -values => [@tlfunclist]);
+$UI{trcReqArgs} = $UI{frmInvoke}->new_treectrl(-showroot => 0, -showrootbutton => 0, -showrootlines => 0, -selectmode => 'single');
+$UI{btReqArrAdd}= $UI{frmInvoke}->new_ttk__button(-text => "Add \@{}", -command => \&btReqArrAdd);
+$UI{btReqArrDel}= $UI{frmInvoke}->new_ttk__button(-text => "Del \@{}", -command => \&btReqArrDel);
+$UI{btInputPeer}= $UI{frmInvoke}->new_ttk__button(-text => "InputPeer/User", -command => \&btInputPeer);
+$UI{btInvoke}   = $UI{frmInvoke}->new_ttk__button(-text => "Invoke!", -command => \&btInvoke);
+$UI{txtUpdates} = $UI{frmUpdates}->new_tk__text(-state => "disabled", -width => 39, -height => 26, -wrap => "char");
 $UI{sbhUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "xview"], -orient => "horizontal");
 $UI{sbvUpdates} = $UI{frmUpdates}->new_ttk__scrollbar(-command => [$UI{txtUpdates}, "yview"], -orient => "vertical");
 $UI{txtMessage} = $UI{frmMessage}->new_tk__text(-state => "disabled", -width => 80, -height => 24, -wrap => "word", -font => 'TkTextFont');
@@ -151,11 +163,13 @@ $UI{sbvMessage} = $UI{frmMessage}->new_ttk__scrollbar(-command => [$UI{txtMessag
 $UI{lbNicklist} = $UI{frmNicklist}->new_tk__listbox(-listvariable => \$lboxNicks, -height => 43);
 $UI{sbhNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "xview"], -orient => "horizontal");
 $UI{sbvNicklist}= $UI{frmNicklist}->new_ttk__scrollbar(-command => [$UI{lbNicklist}, "yview"], -orient => "vertical");
-$UI{panw}->add($UI{frmUpdates}, -weight => 2);
+$UI{panw}->add($UI{panControl}, -weight => 2);
 $UI{panw}->add($UI{panMessages}, -weight => 4);
 $UI{panw}->add($UI{frmNicklist}, -weight => 3);
 $UI{panMessages}->add($UI{frmMsgList}, -weight => 4);
 $UI{panMessages}->add($UI{frmMessage}, -weight => 3);
+$UI{panControl}->add($UI{frmInvoke}, -weight => 1);
+$UI{panControl}->add($UI{frmUpdates}, -weight => 2);
 $UI{tvMsgList}->configure(-xscrollcommand => [$UI{sbhMsgList}, 'set'],  -yscrollcommand => [$UI{sbvMsgList}, 'set']);
 $UI{txtUpdates}->configure(-xscrollcommand => [$UI{sbhUpdates}, 'set'],  -yscrollcommand => [$UI{sbvUpdates}, 'set']);
 $UI{txtMessage}->configure(-yscrollcommand => [$UI{sbvMessage}, 'set']);
@@ -184,6 +198,15 @@ $UI{panw}->g_grid(       -column => 0, -row => 1, -columnspan => 8, -sticky => "
 
 $UI{lblStatus}->g_grid(  -column => 0, -row => 4, -columnspan => 8, -sticky => "nwes", -padx => 1);
 $UI{sizeGrip}->g_grid(   -column => 7, -row => 4, -sticky => "es");
+
+# inside Control pane
+# inside constructor frame
+$UI{cmbTLFunc}->g_pack(  -side => "top",  -fill => "x", -expand => "no",  -pady => 2, -padx => 2);
+$UI{trcReqArgs}->g_pack( -side => "top",  -fill => "both", -expand => "yes", -pady => 2, -padx => 2);
+$UI{btReqArrAdd}->g_pack(-side => "left", -pady => 2, -padx => 2);
+$UI{btReqArrDel}->g_pack(-side => "left", -pady => 2, -padx => 2);
+$UI{btInputPeer}->g_pack(-side => "left", -expand => "yes", -pady => 2, -padx => 2);
+$UI{btInvoke}->g_pack(  -side => "right", -pady => 2, -padx => 2);
 
 # inside Updates frame
 $UI{txtUpdates}->g_grid( -column => 0, -row => 0, -sticky => "nwes");
@@ -277,6 +300,7 @@ if (Tkx::tk_windowingsystem() eq "aqua") {
 $UI{mw}->g_bind("<Return>", \&btSendMsg);
 $UI{lbNicklist}->g_bind("<<ListboxSelect>>", \&onNicklistSelect);
 $UI{tvMsgList}->g_bind("<<TreeviewSelect>>", \&onMsgListSelect);
+$UI{cmbTLFunc}->g_bind("<<ComboboxSelected>>", \&onTLFuncSelected); # see also there
 
 # set tags for messages and their list
 $UI{tvMsgList}->tag_configure("out",            -background => "lightyellow");
@@ -302,6 +326,7 @@ our @_columns = (
 );
 setup_msglist($UI{tvMsgList});
 presetup_tags($UI{txtMessage});
+setup_treqargs($UI{trcReqArgs});
 
 ### GUI subs
 
@@ -442,6 +467,535 @@ sub about {
                     "Copymiddle 2019 vgadfly & nuclight\n" .
                     "All rights reversed.",
     );
+}
+
+### raw API request constructor treectrl
+
+## We have 3 item types:
+# 1) leaf: always builtin type, edit widgets allowed only here
+# 2) HASH: children are fields, each can have own type
+# 3) ARRAY: children are indexes, each always inherits type of parent item
+# ...but for 2 and 3, real type of child may be a choice from a small list:
+# descendants of base class (polymorphic).
+# Moreover, things are complicated by optional fields.
+# So, we must use custom item states.
+sub setup_treqargs {
+    my $trc = shift;    # tree control
+
+    # treectrl needs to setup *everything* - even most basic things!
+    # XXX so take colors from existing listbox
+    my $SystemButtonFace    = $UI{lbNicklist}->cget('-highlightbackground');
+    my $SystemHighlight     = $UI{lbNicklist}->cget('-selectbackground');
+    my $SystemHighlightText = $UI{lbNicklist}->cget('-selectforeground');
+
+    # a hack: instead of real widget, steal checkbox GIFs from demo :)
+   Tkx::image_create_photo('checked', -data => q{
+R0lGODlhDQANABEAACwAAAAADQANAIEAAAB/f3/f39////8CJ4yPNgHtLxYYtNbIbJ146jZ0gzeC
+IuhQ53NJVNpmryZqsYDnemT3BQA7
+   });
+   Tkx::image_create_photo('unchecked', -data => q{
+R0lGODlhDQANABEAACwAAAAADQANAIEAAAB/f3/f39////8CIYyPNgHtLxYYtNbIrMZTX+l9WThw
+ZAmSppqGmADHcnRaBQA7
+    });
+
+    ## custom states - for per-state element visibility options
+    # note next 3 states are named after keys in %TYPES
+    $trc->item_state_define('vector');  # ARRAY nodes - 'vector' in schema
+    $trc->item_state_define('optional');# field may be absent - to correctly draw "checkbox"
+    $trc->item_state_define('builtin'); # value is editable only for builtins
+    # our GUI states
+    $trc->item_state_define('CHECK');   # "checkbox" is set in optional
+    $trc->item_state_define('EDIT');    # while widget is displayed during editing
+    $trc->item_state_define('MenuType');# whether has multiple values in Type column
+
+    # elements
+    $trc->element_create(elemTxtName => 'text', -fill => [$SystemHighlightText => 'selected focus']);
+    $trc->element_create(elemTxtCount => 'text', -fill => 'blue');
+    $trc->element_create(elemTxtValue => 'text', -lines => 1); # NOTE lines - for tk::entry, not text!
+    $trc->element_create(elemRectSel => 'rect',
+        -fill => [$SystemHighlight => 'selected focus', gray => 'selected !focus'],
+        -showfocus => 'yes');
+    $trc->element_create(elemImgCheck => 'image', -image => 'checked CHECK unchecked {}');
+    $trc->element_create(elemWidget => 'window', -destroy => 'yes', -draw => 'yes MenuType no {}');
+
+    ## styles
+
+    # for field/index - elemTxtCount element is visible if ARRAY (vector) node
+    # visual selection for element via elemRectSel (elemTxtName only) also here
+    $trc->style_create('styField');
+    $trc->style_elements(styField => [qw{elemRectSel elemTxtName elemTxtCount}]);
+    $trc->style_layout(styField => 'elemTxtName', -padx => 2, -expand => 'ns', -squeeze => 'x');
+    $trc->style_layout(styField => 'elemTxtCount', -expand => 'ns', -visible => 'yes vector no {}');
+    $trc->style_layout(styField => 'elemRectSel', -union => 'elemTxtName', -iexpand => 'ns', -ipadx => 2);
+
+    # plain text display
+    $trc->style_create('styPlain');
+    $trc->style_elements(styPlain => 'elemTxtValue');
+
+    # plain text display
+    $trc->style_create('styType');
+    $trc->style_elements(styType => 'elemTxtValue elemWidget');
+    $trc->style_layout(styType => 'elemTxtValue', -visible => 'no MenuType'); # see below
+    $trc->style_layout(styType => 'elemWidget',  -squeeze => 'xy'); # see below
+
+    # optional - bit number and a "checkbox"
+    $trc->style_create('styOptFlag');
+    $trc->style_elements(styOptFlag => 'elemImgCheck elemTxtValue');
+    $trc->style_layout(styOptFlag => 'elemImgCheck', -ipadx => 2, -visible => 'yes optional no {}');
+    $trc->style_layout(styOptFlag => 'elemTxtValue'); # XXX pad?
+
+    # value editor
+    $trc->style_create('styValue');
+    $trc->style_elements(styValue => 'elemTxtValue elemWidget');
+    $trc->style_layout(styValue => 'elemTxtValue', -draw => 'no EDIT'); # see below
+# $trc->style_layout(styValue => 'elemWidget', -union => 'elemTxtValue'); # XXX was masking textfor filelist editing
+
+    # (ab)use Tkx-provided instance state for each widget pathname
+    my $vars = $trc->_data();
+
+    # column field names as in generator, assign default item styles where possible
+    $vars->{hColumn}{name}    = $trc->column_create(-text => "Field/index", -itemstyle => 'styField');
+    $vars->{hColumn}{type}    = $trc->column_create(-text => "Type", -squeeze => "yes", -itemstyle => 'styType');
+    $vars->{hColumn}{optional}= $trc->column_create(-text => "?", -itemstyle => "styOptFlag", -itembackground => 'linen white');
+    $vars->{hColumn}{vector}  = $trc->column_create(-text => '@[]', -itemstyle => 'styPlain');
+    $vars->{hColumn}{value}   = $trc->column_create(-text => 'Value', -itemstyle => 'styValue');
+
+    $trc->configure(-treecolumn => $vars->{hColumn}{name});
+
+    # allow reordering columns :)
+    $trc->header_dragconfigure(-enable => 1);
+    $trc->notify_install('<ColumnDrag-receive>');
+    $trc->notify_bind('MyTag', '<ColumnDrag-receive>', '%T column move %C %b');
+
+    ## XXX NOTE semi-HACK! For being able to edit values in-place, we're
+    ## (ab)using tktreectrl's library/filelist-bindings.tcl here, though which
+    ## is itself a semi-hack made for Explorer demos, so we need to carefully
+    ## place hack on hack :) Thus, using knowledge of it's source, we disable
+    ## it's unneeded (made specifically for file browser) parts and arrogantly
+    ## replace some other internal pieces with our code on the fly.
+
+    # elements where secondary (non-double!) click will call editing
+    # NOTE that _treq_one_level will not fill with any text for non-builtin
+    # typss in Value column, so user just won't be able to take aim and hit
+    # the element to fire editing :)
+    Tkx::TreeCtrl__SetEditable($trc, [
+            [$vars->{hColumn}{value}, 'styValue', 'elemTxtValue']
+        ]);
+
+    # Tkx::TreeCtrl__SetDragImage uses DirCnt variable for file browser :( so we
+    # just disable drag completely, it's non of much use on HASHes, though
+    Tkx::bind('TreeCtrlFileList', '<Button1-Motion>', '');
+
+    # where TreeCtrlFileList, which is breaking tag, will allow clicks for us
+    Tkx::TreeCtrl__SetSensitive($trc, [
+            [ $vars->{hColumn}{name},     'styField', 'elemTxtName'],
+            [ $vars->{hColumn}{type},     'styType',  'elemTxtValue'],
+            [ $vars->{hColumn}{optional}, 'styOptFlag', 'elemTxtValue', 'elemImgCheck'],
+            [ $vars->{hColumn}{vector},   'styPlain', 'elemTxtValue'],
+            [ $vars->{hColumn}{value},    'styValue', 'elemTxtValue'],
+        ]);
+    # enable filelist-bindings.tcl for us
+    $trc->g_bindtags(Tkx::linsert($trc->g_bindtags, 1, 'TreeCtrlFileList')); # save one var/splice :)
+
+    # our checkbox emulation is earlier in binding tags
+    $trc->g_bind('<ButtonPress-1>' => [sub {
+                my ($x, $y) = @_;
+                my $ids = $trc->identify($x, $y);
+                return unless $ids =~ /^item\s.+\scolumn\s.+\selem\s.+$/;
+                my %id = Tkx::SplitList($ids);
+                if ($id{column} eq $vars->{hColumn}{optional} and $id{elem} eq 'elemImgCheck') {
+                    $trc->item_state_set($id{item}, '~CHECK');
+                }
+            }, Tkx::Ev('%x', '%y')]
+        );
+
+    # allow events to be fired
+    $trc->notify_install('<Edit-begin>');
+    $trc->notify_install('<Edit-accept>');
+    $trc->notify_install('<Edit-end>');
+
+    # we could just use 3 lines if all we need were just 'string' type...
+    # like this:
+    #   $trc->notify_bind($trc, '<Edit-begin>', '%T item state set %I ~EDIT');
+    #   $trc->notify_bind($trc, '<Edit-accept>', '%T item element configure %I %C %E -text %t');
+    #   $trc->notify_bind($trc, '<Edit-end>', '%T item state set %I ~EDIT');
+    # were we toggle EDIT state in begin and end of edit for text element to be
+    # not drawn in EDIT state, to not get in our way...
+    # ...but we'll have different widget types, and two possible columns for
+    # editing (type and value), so `forcolumn` instead of entire item's state
+
+    # For most builtin types, we'll still have entry. It would be better to have
+    # e.g. spinbox for integer and checkbox for boolean, but due to laziness and
+    # visual constraints (these spinbox buttons and borders will greatly
+    # increase item height which is not good if tree is big) we just change
+    # validation
+    my %validatecmd = (
+        string	=> sub { 1 },
+        bytes	=> sub { 1 },
+        int	=> sub { $_[0] =~ /^\s*[-+]?\d{1,10}\s*$/  ? 1 : 0 },
+        nat	=> sub { $_[0] =~ /^\s*\d+\s*$/            ? 1 : 0 },
+        long	=> sub { $_[0] =~ /^\s*[-+]?\d{1,19}\s*$/  ? 1 : 0},
+        int128	=> sub { 1 },   # XXX
+        int256	=> sub { 1 },   # XXX
+        double	=> sub { $_[0] =~ /^\s*[-+]?(\d+|\.\d+|\d+\.\d*)([eE][-+]?\d+)?\s*$/ ? 1 : 0},
+        Bool	=> sub { 1 },   # will be interpreted on invoke according to Perl rules
+        true	=> sub { Tkx::i::call($_[-1], "insert", 0, "LOL WAT? it will be always true"); 1 },
+        date	=> sub { 1 },   # XXX wat? haven't seen such in schema
+    );
+    $trc->notify_bind($trc, '<Edit-begin>' => [sub {
+                my ($entry, $I, $C, $E) = @_;
+                $trc->item_state_forcolumn($I, $C, '~EDIT');
+                my $type = $trc->item_text($I, $vars->{hColumn}{type});
+                no strict 'refs';
+                &{"Tkx::${entry}_delete"}(1 => 'end') # fix too much spaces
+                    if &{"Tkx::${entry}_get"}() =~ /^\s+$/;
+                &{"Tkx::${entry}_configure"}(
+                    -validate => 'key',
+                    -validatecommand => [$validatecmd{$type}, Tkx::Ev("%P"), $entry]);
+            }, Tkx::Ev('%T.entry', '%I', '%C', '%E')]
+        );
+    $trc->notify_bind($trc, '<Edit-accept>', '%T item element configure %I %C %E -text %t');
+    $trc->notify_bind($trc, '<Edit-end>' => [sub {
+                my ($entry, $I, $C, $E) = @_;
+                $trc->item_state_forcolumn($I, $C, '~EDIT');
+                # no matter what type was, will be recreated as entry next time
+                Tkx::destroy($entry) if Tkx::i::call("winfo", "exists", $entry);
+            }, Tkx::Ev('%T.entry', '%I', '%C', '%E')]
+        );
+
+    # link Perl hash <-> Tcl array for storing menu states, using stringification
+    $vars->{MenuType} = {};
+    tie %{$vars->{MenuType}}, "Tcl::Var", Tkx::i::interp(), "::perl::MenuType$trc";
+
+    $vars->{MenuTypeCnt} = {};  # counter closure XXX FIXME
+    # use the almighty Tcl's trace command!
+    Tkx::trace_add_variable("::perl::MenuType$trc", [qw(array write)], sub {
+        my ($varname, $key, $op) = @_;
+        return unless $op eq 'write';
+        $vars->{MenuTypeCnt}{$key}++;
+        # here we have already written (new) value, but what about setting
+        # first time? and selecting already selected? we solve both by comparing
+        # with text element, which is set for us before menu creation, and which
+        # we'll also set
+        if ($trc->item_id($key)) {  # check item existence
+    say "fired $varname, $key, $op|${$vars->{MenuType}}{$key}";
+            if ($trc->item_text($key, $vars->{hColumn}{type}) ne ${$vars->{MenuType}}{$key}) {
+    say "ne";
+                # clear children and populate with new type
+                $trc->item_delete($_) for Tkx::SplitList($trc->item_children($key));
+                _treq_one_level($trc, ${$vars->{MenuType}}{$key}, $key);
+                $trc->item_expand($key);
+
+                # finally remember current value for future calls
+                $trc->item_text($key, $vars->{hColumn}{type}, ${$vars->{MenuType}}{$key});
+            }
+        }
+    });
+
+    # and finally, process current selection to disable/enable buttons etc.
+    $trc->notify_bind($trc, '<Selection>' => [sub {
+            my ($c, $D, $S) = @_;
+            die "misconfiguration! only 1 item in selection supports, not $c" if $c > 1;
+            $vars->{Selection} = $S;
+            my $parent = $c ? $trc->item_parent($S) : '';
+            $UI{btReqArrAdd}->state(
+                $c && (
+                $trc->item_state_get($S, 'vector') || $trc->item_state_get($parent, 'vector'))
+                    ? "!disabled"
+                    : "disabled"
+            );
+            $UI{btReqArrDel}->state(
+                $c && $trc->item_state_get($parent, 'vector')
+                    ? "!disabled"
+                    : "disabled"
+            );
+            $UI{btInputPeer}->state(
+                $c
+                && ! $trc->item_state_get($S, 'builtin')
+                && ! $trc->item_state_get($S, 'vector')
+                && $trc->item_text($S, $vars->{hColumn}{type}) =~ /Input/
+                    ? "!disabled"
+                    : "disabled"
+            );
+        }, Tkx::Ev('%c', '%D', '%S')]
+    );
+}
+
+## Create one item, fill it's fields and return it's handle
+# naming and positioning in tree must be done by caller
+# %$TYPE is hash entry value for one field in schema
+sub _treq_one_item {
+    my ($trc, $name, $TYPE) = @_;
+    my $vars = $trc->_data();
+
+    my $hItem = $trc->item_create(
+        $TYPE->{vector} || !$TYPE->{builtin}
+            ? (-button => "yes")
+            : ()
+    );
+    # set states according to generated type options
+    $trc->item_state_set($hItem, [map { ($TYPE->{$_} ? '' : '!').$_ } qw(vector optional builtin)]);
+
+    # set text fields
+    $trc->item_text($hItem, $vars->{hColumn}{name}, $name);
+    $trc->item_text($hItem, $vars->{hColumn}{type}, $TYPE->{type} =~ s/Telegram:://r);
+    $trc->item_element_configure(
+        $hItem, $vars->{hColumn}->{optional}, 'elemTxtValue',
+        -text => (split(/\./, $TYPE->{optional}))[1])       if $TYPE->{optional};
+    $trc->item_text($hItem, $vars->{hColumn}{vector}, '@')  if $TYPE->{vector};
+    $trc->item_element_configure(
+        $hItem, $vars->{hColumn}->{value}, 'elemTxtValue',
+        -text => (' 'x 10), -font => '') if $TYPE->{builtin}; # XXX
+
+    # populate children if possible & handle polymorphic
+    unless ($TYPE->{vector} || $TYPE->{builtin}) {
+        # detect if class is polymorphic...
+        my ($poly, @subc);
+        $poly = eval {
+            no strict 'refs';
+            require Class::Inspector->filename($TYPE->{type});
+            ${"$TYPE->{type}ABC::VERSION"}
+        };
+        # ...but it may have only one subclass...
+        if ($poly) {
+            my $sc = Class::Inspector->subclasses($TYPE->{type}.'ABC');
+            @subc = @$sc;
+        }
+        # ...in which case giving a choice is meaningless
+        if (@subc > 1) {    # make menu
+            $trc->item_state_set($hItem, 'MenuType');
+            $trc->item_text($hItem, $vars->{hColumn}{type}, $subc[0]); # for trace
+            my $path = "$trc.m$hItem";
+            my $menu = Tkx::tk___optionMenu($path, "::perl::MenuType$trc($hItem)", @subc);
+            # make it taking less space on screen, though a little ugly
+            Tkx::i::call($path, "configure", -padx => 0, -pady => 0, -borderwidth => 0);
+            $trc->item_element_configure($hItem, $vars->{hColumn}->{type}, 'elemWidget',
+                -window => $path
+            );
+            # TODO
+        }
+        else {  # only one class
+            # NOTE it may be different from base class
+            _treq_one_level($trc, $poly ? $subc[0] : $TYPE->{type}, $hItem);
+        }
+    }
+
+    return $hItem;
+}
+
+## Populate fields of one hash
+# 'require' must be done for us by caller
+sub _treq_one_level {
+    my ($trc, $class, $parent) = @_;
+    my $vars = $trc->_data();
+
+    no strict 'refs';
+    # sort as in schema XXX kludge 
+    my @fields = sort {
+            ${"$class\::FIELDS"}{$a} <=> ${"$class\::FIELDS"}{$b}
+        } keys %{"$class\::FIELDS"};
+    my %TYPES = %{"$class\::TYPES"};
+
+    # filter out 'flags'
+    # XXX we don't handle multiple such though they wasn't seen in real schemas
+    my $optional = (map {
+            exists $TYPES{$_}->{optional}
+                ? (split(/\./, $TYPES{$_}->{optional}))[0]
+                : ()
+        } keys %TYPES)[0] // '';
+    @fields = grep { $_ ne $optional } @fields;
+
+    for my $name (@fields) {
+        my $hItem = _treq_one_item($trc, $name, $TYPES{$name});
+
+        $trc->item_collapse($hItem);
+
+        $trc->item_lastchild($parent => $hItem);
+    }
+}
+
+my $_cmbxJump = '';     # type to navigate prefix/substring
+sub onTLFuncSelected {
+    $_cmbxJump = '';
+    my $tltyp = (grep { exists $_->{func} and $_->{func} eq $cmbxTLFunc }
+        values %Telegram::ObjTable::tl_type
+    )[0];
+    my $class = $tltyp->{class};
+    require $tltyp->{file};
+    my $_nargs = do { no strict 'refs'; grep(!/^flags$/, keys %{"$class\::FIELDS"})};
+
+    $UI{cmbTLFunc}->selection_clear();  # make it visually less odd
+    $UI{trcReqArgs}->g_focus();         # prevent accidental changing after select
+    $statusText="selected $class ($_nargs non-flags args) returns @{[$tltyp->{vector} ? 'vector of' : '']} $tltyp->{returns}";
+
+    # clear all
+    $UI{trcReqArgs}->item_delete($_)
+        for Tkx::SplitList($UI{trcReqArgs}->item_children("root"));
+
+    # buttons will be re-enabled by selection
+    $UI{btReqArrAdd}->state("disabled");
+    $UI{btReqArrDel}->state("disabled");
+    $UI{btInputPeer}->state("disabled");
+
+    # populate immediate arguments
+    _treq_one_level($UI{trcReqArgs}, $class, "root");
+}
+
+# pressing letters to jump in the long list - first by prefix, then any substring
+# FIXME it works strange and only in collapsed state
+for my $key ('a'..'z', 'A'..'Z', '.', '_') {
+    $UI{cmbTLFunc}->g_bind($key, sub {
+            $_cmbxJump .= $key;
+            my $cur = $UI{cmbTLFunc}->current();
+            my $new = -1;
+            foreach my $i (0 .. $#tlfunclist) {
+                $new = $i, last if $tlfunclist[$i] =~ /^$_cmbxJump/;
+            }
+            unless ($new > 0) {
+                foreach my $i ($cur .. $#tlfunclist) {
+                    $new = $i, last if $tlfunclist[$i] =~ /$_cmbxJump/;
+                }
+            }
+            $UI{cmbTLFunc}->current($new) if $new > 0 && $new != $cur;
+        });
+}
+
+sub _treq_renumber {
+    my ($trc, $parent, $hItem) = @_;
+    my $vars = $trc->_data();
+
+    my $numc = $trc->item_numchildren($parent);
+    # update counter
+    $trc->item_element_configure($parent,
+        $vars->{hColumn}{name}, 'elemTxtCount',
+        -text => "($numc)");
+
+    # if nothing to do
+    return unless $numc;
+    if ($numc == 1) {
+        $trc->item_text($trc->item_firstchild($parent), $vars->{hColumn}{name}, '0');
+        return;
+    }
+
+    my $idx = 0;
+    for my $id (Tkx::SplitList($trc->item_children($parent))) {
+        $trc->item_text($id, $vars->{hColumn}{name}, $idx++);
+    }
+}
+
+sub btReqArrAdd {
+    my $vars = $UI{trcReqArgs}->_data();
+    my $trc  = $UI{trcReqArgs};
+
+    my $select = $vars->{Selection};
+    my $parent = $trc->item_state_get($select, 'vector')
+        ? $select
+        : $trc->item_parent($select);
+    die "parent $parent is not vector!"
+        unless $trc->item_state_get($parent, 'vector');
+
+    my $newIdx = ($parent == $select) ? 0 : 1 + $trc->item_text($select, $vars->{hColumn}{name});
+    my $builtin = $trc->item_state_get($parent, 'builtin');
+
+    my $class = $trc->item_text($parent, $vars->{hColumn}{type});
+    $class = 'Telegram::' . $class unless $class =~ /^Telegram::/ or $builtin;
+
+    # child of vector will never be vector or optional, inherit other properties
+    my $type = {
+        type    => $class,
+        builtin => $builtin,
+        vector  => 0,
+    };
+
+    my $hItem = _treq_one_item($trc, $newIdx, $type);
+
+    # insert to tree
+    if ($parent == $select) {
+        $trc->item_lastchild($parent => $hItem);
+    }
+    else {
+        $trc->item_nextsibling($select => $hItem);
+    }
+
+    _treq_renumber($trc, $parent, $hItem);    # fix shifted indexes
+    $trc->item_expand($parent);
+}
+
+sub btReqArrDel {
+    my $vars = $UI{trcReqArgs}->_data();
+    my $trc  = $UI{trcReqArgs};
+    my $select = $vars->{Selection};
+    my $parent = $trc->item_parent($select);
+    die "parent $parent is not vector!"
+        unless $trc->item_state_get($parent, 'vector');
+    $trc->item_delete($select);
+    _treq_renumber($trc, $parent);    # fix shifted indexes
+}
+
+sub btInputPeer {
+    $statusText="No ID for listbox item", return unless $curNicklistId;
+
+    my $vars = $UI{trcReqArgs}->_data();
+    my $trc  = $UI{trcReqArgs};
+    my $peer = $tg->peer_from_id($curNicklistId);
+
+    my $select = $vars->{Selection};
+
+    for my $child (Tkx::SplitList($trc->item_children($select))) {
+        next unless $trc->item_state_get($child, 'builtin');
+        my $name = $trc->item_text($child, $vars->{hColumn}{name});
+        for (keys %$peer) {
+            if ($_ eq $name) {
+                $trc->item_text($child, $vars->{hColumn}{value}, $peer->{$name});
+            }
+        }
+    }
+}
+
+sub _treq_walk {
+    my ($trc, $parent) = @_;
+    my $vars = $trc->_data();
+
+    my @pairs = ();
+
+    for my $child (Tkx::SplitList($trc->item_children($parent))) {
+        next if $trc->item_state_get($child, 'optional') && !$trc->item_state_get($child, 'CHECK');
+        my $name = $trc->item_text($child, $vars->{hColumn}{name});
+        my $type = $trc->item_text($child, $vars->{hColumn}{type});
+        my $value = $trc->item_text($child, $vars->{hColumn}{value});
+        if ($trc->item_state_get($child, 'builtin')) {
+            $value =~ s/^\s+//;
+            $value =~ s/\s+$//;
+            push @pairs, $name => $value;
+        }
+        elsif ($trc->item_state_get($child, 'vector')) {
+            push @pairs, $name => [ pairvalues _treq_walk($trc, $child) ];
+        }
+        else { # class
+            $type = 'Telegram::' . $type unless $type =~ /^Telegram::/;
+            push @pairs, $name => $type->new( _treq_walk($trc, $child) );
+        }
+    }
+
+    return @pairs;
+}
+
+sub btInvoke {
+    my $vars = $UI{trcReqArgs}->_data();
+    my $trc  = $UI{trcReqArgs};
+
+    my $tltyp = (grep { exists $_->{func} and $_->{func} eq $cmbxTLFunc }
+        values %Telegram::ObjTable::tl_type
+    )[0];
+    my $class = $tltyp->{class};
+    my $request = $class->new(_treq_walk($trc, 'root'));
+
+    # XXX temporary instead of real invoke
+    my $dump = Dumper($request);
+    AE::log info => "tg->invoke $dump";
+    render($dump);
+
+    $statusText="like invoked ^)";
 }
 
 ### semi-GUI subs
@@ -594,7 +1148,7 @@ sub presetup_tags {
 
     # TODO font_actual (especially for subscripts/superscripts)
     # '::' correspond to generated classes, others are manual and from ::PageBlock
-    # TODO elided text for additional fileds (see comments like '#url')
+    # TODO elided text for additional fields (see comments like '#url')
 
     # usual message formatting
     $text->tag_configure('::MessageEntityMention',      -foreground => 'red', );
@@ -666,7 +1220,7 @@ sub render_msg {
     if (exists $msg->{entities}) {
         foreach (@{ $msg->{entities} }) {
             $txtwidg->tag_add(
-                ref $_,
+                substr(ref $_, 8),
                 "1.0+" . $_->{offset} . "chars",
                 "1.0+" . ($_->{offset} + $_->{length}) . "chars"
             );
