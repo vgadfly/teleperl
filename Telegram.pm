@@ -169,12 +169,12 @@ sub _mt
 sub _real_invoke
 {
     my ( $self, $query, $cb, %param ) = @_;
+    my $id_cb = delete $param{on_send};
+    my $ack_cb = delete $param{on_ack};
     $self->{_mt}->invoke( [ $query, 
         sub {
             my ($req_id, $when) = @_;
             AE::log debug => "invoke ($when) $req_id for " . ref $query;
-            my $id_cb = delete $param{on_send};
-            my $ack_cb = delete $param{on_ack};
             if ($when eq 'push') {
                 $self->{_req}{$req_id}{$_} = $param{$_} for keys %param;
                 $self->{_req}{$req_id}{query} = $query;
@@ -212,6 +212,7 @@ sub invoke
         }
         AE::log info => "invoke: " . $class;
         AE::log trace => Dumper $query;
+        # XXX crutch here if $tl_type->{returns} = Updates ?
     }
 
     # docs says:
@@ -306,7 +307,7 @@ sub _handle_rpc_result
     AE::log debug => "Got result %s for $req_id", ref $res->{result};
     
     # Updates in result
-    $self->event( update => $res->{result} )
+    $self->event( update => $res->{result}, result_of => $self->{_req}{$req_id}{query} )
         if ( $res->{result}->isa('Telegram::UpdatesABC') );
 
     # Errors

@@ -67,6 +67,7 @@ sub init {
     );
 
     $tg->reg_cb( update => sub { shift; $app->report_update(@_) } );
+    $tg->reg_cb( message=> sub { shift; $app->report_update(@_) } );
     $tg->reg_cb( fetch => sub { 
             shift;
             my %res = @_;

@@ -37,6 +37,8 @@ use Telegram::Updates::GetDifference;
 use Telegram::Updates::GetChannelDifference;
 
 use Telegram::InputChannel;
+use Telegram::Message;
+use Telegram::Peer;
 
 sub new
 {
@@ -97,11 +99,12 @@ sub _unlock
 
     AE::log info => "unlocking updates queue";
     # process queue
-    $self->_do_handle_updates($_) while ($_ = shift @{$self->{_q}});
+    $self->_do_handle_updates(@$_) while shift @{$self->{_q}};
     
     $self->{_lock} = 0;
 }
 
+# XXX TODO timer: docs recommends crutch of delaying up to 0.5 sec
 sub _check_pts
 {
     my ($self, $pts, $count, $channel) = @_;
@@ -153,12 +156,12 @@ sub _debug_print_update
 
     AE::log debug => ref $upd;
     
-    if ($upd->isa('Telegram::Update::UpdateNewChannelMessage')) {
+    if ($upd->isa('Telegram::UpdateNewChannelMessage')) {
         my $ch_id = $upd->{message}{to_id}{channel_id};
         AE::log debug => "chan=$ch_id pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{channel_pts}{$ch_id}"
             if (exists $upd->{pts});
     }
-    elsif ($upd->isa('Telegram::Update::UpdateNewMessage')) {
+    elsif ($upd->isa('Telegram::UpdateNewMessage')) {
         AE::log debug => "pts=$upd->{pts}(+$upd->{pts_count}) last=$self->{session}{pts}"
             if (exists $upd->{pts});
     }
@@ -170,8 +173,6 @@ sub _handle_update
 {
     my ($self, $upd) = @_;
 
-    #say ref $upd;
-
     $self->_debug_print_update($upd);
     
     if ($upd->isa('Telegram::UpdateChannelTooLong')) {
@@ -182,15 +183,20 @@ sub _handle_update
             Telegram::Updates::GetChannelDifference->new(
                 channel => Telegram::InputChannel->new( channel_id => $upd->{channel_id} ),
                 filter => Telegram::ChannelMessagesFilterEmpty->new,
-                pts => $local_pts,
+                pts => $local_pts // ($upd->{pts} ? ($upd->{pts} - 1) : 1), #XXX -1=guess (docs unclear)
                 limit => 0
             ),
             sub { $self->_handle_channel_diff( $upd->{channel_id}, @_ ) },
             fix_input => 1
-        ) if defined $local_pts;
+        );
+        $self->event(sync_lost => $upd->{channel_id}) unless defined $local_pts;
         return;
     }
-    
+
+    if ($upd->isa('Telegram::UpdatePtsChanged')) {
+        return $self->sync(1);
+    }
+
     my $pts_good;
     if (
         $upd->isa('Telegram::UpdateNewChannelMessage') or
@@ -202,16 +208,21 @@ sub _handle_update
         ) if defined $chan;
     }
     if (
-        $upd->isa('Telegram::UpdateDeleteChannelMessages') or 
-        $upd->isa('Telegram::UpdateChannelWebPage') 
+        $upd->isa('Telegram::UpdateDeleteChannelMessages') or
+        $upd->isa('Telegram::UpdateReadChannelInbox') or
+        $upd->isa('Telegram::UpdateChannelWebPage')
     ) {
         $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count}, $upd->{channel_id} );
     }
     if ( 
         $upd->isa('Telegram::UpdateNewMessage') or
         $upd->isa('Telegram::UpdateEditMessage') or
-        $upd->isa('Telegram::UpdateDeleteMessages') or 
-        $upd->isa('Telegram::UpdateWebPage') 
+        $upd->isa('Telegram::UpdateDeleteMessages') or
+        $upd->isa('Telegram::UpdateReadMessagesContents') or
+        $upd->isa('Telegram::UpdateReadHistoryInbox') or
+        $upd->isa('Telegram::UpdateReadHistoryOutbox') or
+        $upd->isa('Telegram::UpdateFolderPeers') or # XXX here or parse Peer?
+        $upd->isa('Telegram::UpdateWebPage')
     ) {
         $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count} );
     }
@@ -223,12 +234,36 @@ sub _handle_update
 
 sub _handle_short_update
 {
-    my ($self, $upd) = @_;
+    my ($self, $update, %param) = @_;
+    my @f = qw/out mentioned media_unread silent id date message fwd_from via_bot_id reply_to_msg_id entities/;
 
-    # XXX: should unfold short update
-    $self->event( update => $upd );
-    #my $in_msg = $self->message_from_update( $upd );
-    #$self->{_tg}{on_update}->( $in_msg ) if $self->{_tg}{on_update};
+    # XXX we can unfold here some fully, some partially (self_id may be
+    # not yet known) and sent query still should have be done outside :(
+    if ($update->isa('Telegram::UpdateShortChatMessage')) {
+        my $m = Telegram::Message->new;
+        local $_;
+        $m->{$_} = $update->{$_} for @f;
+
+        $m->{from_id} = $update->{from_id};
+        $m->{to_id} = Telegram::PeerChat->new(chat_id => $update->{chat_id});
+        return $self->event( message => $m, ref $update );
+    }
+    elsif ($update->isa('Telegram::UpdateShortMessage')) {
+        my $m = Telegram::Message->new;
+        local $_;
+        $m->{$_} = $update->{$_} for @f;
+
+        if ($update->{out}) {
+            $m->{to_id} = Telegram::PeerUser->new( user_id => $update->{user_id} );
+            $m->{from_id} = 0;   # XXX self_id
+        }
+        else {
+            $m->{to_id} = undef; # XXX self_id
+            $m->{from_id} = $update->{user_id};
+        }
+        return $self->event( short => $m );
+    }
+    $self->event( short => $update, %param );
 }
 
 ## store seq and date
@@ -238,7 +273,7 @@ sub _store_seq_date
     if ($seq > 0) {
         if ($seq > $self->{session}{seq} + 1) {
             # update hole
-            AE::log warn => "\rupdate seq hole\n";
+            AE::log warn => "update seq hole";
         }
         $self->{session}{seq} = $seq;
     }
@@ -250,8 +285,6 @@ sub _handle_upd_diff
     my ($self, $diff) = @_;
     my $unlock = 1;
 
-    #say ref $diff;
-
     unless ( $diff->isa('Telegram::Updates::DifferenceABC') ) {
         AE::log warn => "not diff: " . ref $diff;
         $self->_unlock;
@@ -259,10 +292,25 @@ sub _handle_upd_diff
     }
     return $self->_unlock if $diff->isa('Telegram::Updates::DifferenceEmpty');
 
-    #my @t = localtime;
-    #print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
-    #say ref $diff;
-  
+    if ($diff->isa('Telegram::Updates::DifferenceTooLong')) {
+        # XXX it does not contain full state, just pts!
+        $self->{session}{pts} = $diff->{pts};
+        # XXX this wasn't observed in real life with session interruptions
+        # up to several days, should we do the query? or it will allways
+        # return Empty to us? if analogous to channels, then it will be
+        # Empty, but docs for layer 105 states 'refetch' :-/
+        $self->event( 'query',
+            Telegram::Updates::GetDifference->new(
+                    date => $self->{session}{date},
+                    pts => $diff->{pts},
+                    qts => -1,
+            ),
+            sub { $self->_handle_upd_diff(@_) }
+        );
+        $self->event(sync_lost => 'common');
+        return $self->_unlock; # as we don't know what is right XXX
+    }
+
     my $upd_state;
     if ($diff->isa('Telegram::Updates::Difference')) {
         $upd_state = $diff->{state};
@@ -313,12 +361,8 @@ sub _handle_channel_diff
         AE::log warn => "not diff: " . ref $diff;
         return;
     }
-    return if $diff->isa('Telegram::Updates::ChannelDifferenceEmpty');
 
-    #my @t = localtime;
-    #print "---\n", join(":", map {"0"x(2-length).$_} reverse @t[0..2]), " : ";
-    #say ref $diff;
-  
+    # TODO change here in layer 99 - will be no pts
     if ($diff->isa('Telegram::Updates::ChannelDifferenceTooLong')) {
         AE::log debug => "ChannelDifferenceTooLong";
         
@@ -330,7 +374,7 @@ sub _handle_channel_diff
         AE::log info => "new pts=$diff->{pts}";
         
         for my $msg (@{$diff->{messages}}) {
-            $self->event( update => $msg );
+            $self->event( message => $msg );
         }
         $self->event(sync_lost => $channel);
 
@@ -339,7 +383,21 @@ sub _handle_channel_diff
 
     AE::log debug => "channel=$channel, new pts=$diff->{pts}" ;
     $self->{session}{channel_pts}{$channel} = $diff->{pts};  
+    return if $diff->isa('Telegram::Updates::ChannelDifferenceEmpty');
 
+    # like Slice for common updates
+    if (not $diff->{final}) {
+        $self->event( 'query',
+            Telegram::Updates::GetChannelDifference->new(
+                channel => Telegram::InputChannel->new( channel_id => $channel ),
+                filter => Telegram::ChannelMessagesFilterEmpty->new,
+                pts => $diff->{pts},
+                limit => 0
+            ),
+            sub { $self->_handle_channel_diff( $channel, @_ ) },
+            fix_input => 1
+        );
+    }
     $self->event( 'cache', users => $diff->{users} );
     $self->event( 'cache', chats => $diff->{chats} );
     
@@ -356,35 +414,38 @@ sub _handle_channel_diff
 
 sub handle_updates
 {
-    my ($self, $updates) = @_;
+    my $self = shift;
 
     if ( $self->{_lock} ) {
-        push @{$self->{_q}}, $updates;
+        push @{$self->{_q}}, [ @_ ];
     }
     else {
-        $self->_do_handle_updates($updates);
+        $self->_do_handle_updates(@_);
     }
 }
 
 sub _do_handle_updates
 {
-    my ($self, $updates) = @_;
+    my ($self, $updates, %param) = @_;
 
     # short spec updates
-    # ShortSentMessage?
     if ( $updates->isa('Telegram::UpdateShortMessage') or
-        $updates->isa('Telegram::UpdateShortChatMessage') )
-    {
+        $updates->isa('Telegram::UpdateShortChatMessage') or
+        $updates->isa('Telegram::UpdateShortSentMessage')
+    ) {
         $self->_store_seq_date( 0, $updates->{date} );
-        if ( $self->_check_pts( $updates->{pts}, $updates->{pts_count} ) ) {
-            $self->_handle_short_update( $updates );
+        my $pts_good = $self->_check_pts( $updates->{pts}, $updates->{pts_count} );
+
+        # Sent should be only in RpcResult, so check pts but still process
+        if ( $pts_good or $updates->isa('Telegram::UpdateShortSentMessage') ) {
+            $self->_handle_short_update( $updates, %param );
         }
     }
 
-    # XXX: UpdatesCombined
+    # XXX: UpdatesCombined not ever seen for a year; docs unclear if it's important
     if ( $updates->isa('Telegram::UpdatesCombined') ) {
-        $self->_fatal('UpdatesCombined');
-        return;
+        AE::log error => "UpdatesCombined observed in the wild! Wow! Report this! we continue processing but unsure if correct";
+        bless $updates, 'Telegram::Updates';
     }
     # regular updates
     if ( $updates->isa('Telegram::Updates') ) {

@@ -77,6 +77,8 @@ sub new
     $self->{_upd}->reg_cb( query => sub { shift; $self->invoke(@_) } );
     $self->{_upd}->reg_cb( cache => sub { shift; $self->{_cache}->cache(@_) } );
     $self->{_upd}->reg_cb( update => sub { shift; $self->_handle_update(@_) } );
+    $self->{_upd}->reg_cb( short => sub { shift; $self->_handle_short_update(@_) } );
+    $self->{_upd}->reg_cb( sync_lost => sub { AE::log error => "implement me! sync_lost @_" } );
     $self->{_upd}->reg_cb( message => sub { shift; $self->_handle_message(@_) } );
 
     if ( not defined $arg{online} or $arg{online} ) {
@@ -247,7 +249,7 @@ sub register_filter_event {
 
     # XXX TODO support more tables?
     die "unsupported filter table"
-        unless grep { $table eq $_ } ('raw', 'update');
+        unless grep { $table eq $_ } qw(raw update message updormsg);
 
     push @{ $self->{_filters}{$table} }, +{
             name    => $evname,
@@ -255,60 +257,70 @@ sub register_filter_event {
         };
 }
 
-sub _handle_update
+sub _handle_short_update
 {
-    my ($self, $update) = @_;
+    my ($self, $update, %param) = @_;
 
     # fix this shit to always be uniform full Telegram::Message before
     # handling, if it is not yet XXX TODO wtf UpdateShortSentMessage ?! docs:
     # 'chat has to be EXTRACTED FROM THE METHOD CALL THAT RETURNED THIS OBJECT'
     # so not here?.. >_<
-    if ( $update->isa('Telegram::UpdateNewMessage') or
-         $update->isa('Telegram::UpdateNewChannelMessage')
-    ) {
-        $self->_handle_message( $update->{message} );
+    # XXX 11.11 desktop uses ShortSent to just assign ID as with random id
+    # + fix entities (& maybe media) - that is, fabricates update of other
+    # type internally
+    if ($update->isa('Telegram::UpdateShortSentMessage')) {
+        my $query = $param{result_of};
+        # TODO implement out msg queue and plug this into it
+        # XXX and then decide if this should emit 'message' event
     }
-    elsif ($update->isa('Telegram::UpdateShortMessage')) {
-        my $m = Telegram::Message->new;
-        local $_;
-        $m->{$_} = $update->{$_}
-            for qw/out mentioned media_unread silent id date message fwd_from via_bot_id reply_to_msg_id entities/;
-
+    elsif ($update->isa('Telegram::Message')) {
+        # XXX this should be done in UpdateManager but it needs self_id in
+        # cache which may be not available yet TODO think how to pass it and
+        # fill it early after auth
         if ($update->{out}) {
-            $m->{to_id} = Telegram::PeerUser->new( user_id => $update->{user_id} );
-            $m->{from_id} = $self->{_cache}->self_id;
+            $update->{from_id} = $self->{_cache}->self_id;
         }
         else {
-            $m->{to_id} = Telegram::PeerUser->new( user_id => $self->{_cache}->self_id );
-            $m->{from_id} = $update->{user_id};
+            $update->{to_id} = Telegram::PeerUser->new( user_id => $self->{_cache}->self_id );
         }
-        $self->_handle_message($m);
+        $self->_handle_message($update, 'Telegram::UpdateShortMessage');
     }
-    elsif ($update->isa('Telegram::UpdateShortChatMessage')) {
-        my $m = Telegram::Message->new;
-        local $_;
-        $m->{$_} = $update->{$_}
-            for qw/out mentioned media_unread silent id date message fwd_from via_bot_id reply_to_msg_id entities/;
+}
 
-        $m->{from_id} = $update->{from_id};
-        $m->{to_id} = Telegram::PeerChat->new(chat_id => $update->{chat_id});
-        
-        $self->_handle_message($m);
-    }
-
-    # XXX
-    $self->event( update => $update );
+sub _handle_update
+{
+    my ($self, $update) = @_;
 
     AE::log trace => "update: ". Dumper($update);
 
-    $self->_run_filters(update => $update);
+    if ( $update->isa('Telegram::UpdateNewMessage') or
+         $update->isa('Telegram::UpdateNewChannelMessage') or
+         $update->isa('Telegram::UpdateEditChannelMessage') or
+         $update->isa('Telegram::UpdateEditMessage') or
+         $update->isa('Telegram::UpdateNewScheduledMessage')
+    ) {
+        $self->_handle_message( $update->{message}, ref $update );
+    }
+    else {
+        # XXX deal with filters: for some event message called directly
+        $self->_run_filters(update => $update);
+        $self->event( update => $update );
+    }
+
+    $self->_run_filters(updormsg => $update);
 }
 
+## this event is always Telegram::Message and has no other info except class
 sub _handle_message
 {
-    my ($self, $mesg) = @_;
+    my ($self, $mesg, $updtype) = @_;
 
-    $self->event( update => $mesg );
+    $self->event( message => $mesg, $updtype );
+
+    $self->_run_filters(message => $mesg);
+
+    # we could be called directly from UpdateManager
+    $self->_run_filters(updormsg => $mesg) if caller ne __PACKAGE__;
 
     if ( $self->{autofetch} and defined $mesg->{media} ) {
         if ( $mesg->{media}->isa('Telegram::MessageMediaDocument') ) {
