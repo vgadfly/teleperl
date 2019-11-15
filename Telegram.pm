@@ -24,6 +24,7 @@ use AnyEvent;
 
 use MTProto;
 use MTProto::Ping;
+use MTProto::GetFutureSalts;
 
 ## Telegram API
 
@@ -432,7 +433,7 @@ sub _run_filters
 {
     my ($self, $table, $data) = @_;
 
-    for my $rule ($self->{_filters}{$table}) {
+    for my $rule (@{ $self->{_filters}{$table} }) {
         if (my @res = $rule->{filter}->match($data)) {
             $self->event( $table . '_' . $rule->{name}, @res );
         }

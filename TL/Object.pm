@@ -13,17 +13,130 @@ use IO::Uncompress::Gunzip qw/gunzip/;
 
 use Data::Dumper;
 
+use Encode qw(/utf8/ :fallback_all);
+use Params::Validate qw(!:DEFAULT :types validate_with);
+
 =head1 SYNOPSYS
 
   Provides bare types pack/unpack.
 
 =cut
 
+our $UTF8_STRINGS = 0;  # whether do UTF encoding/decoding by schema
+our $VALIDATE = 0;      # bit 0 - on pack, bit 1 - on unpack
+our $DEFAULT_NUMBERS = 0; # put default value (currently=0) if num field absent
+
 sub new
 {
     my ($self, %arg) = @_;
     @$self{ keys %arg } = @arg{ keys %arg };
     return $self;
+}
+
+sub _val_spec
+{
+    my $class = shift;
+    my ($spec, %TYPES);
+
+    {
+        no strict 'refs';
+        $spec = ${"$class\::_VALSPEC"};
+        return $spec if defined $spec;
+        %TYPES = %{"$class\::TYPES"};
+    }
+
+    $spec = { };
+
+    # handle 'flags' XXX we don't handle multiple such though
+    # they wasn't seen in real schemas
+    my $optional = (map {
+          exists $TYPES{$_}->{optional}
+            ? (split(/\./, $TYPES{$_}->{optional}))[0]
+            : ()
+        } keys %TYPES)[0] // '';
+
+    for my $name (keys %TYPES) {
+        my %TYPE = %{ $TYPES{$name} };
+        if ($name eq $optional or $TYPE{bang}) {
+            $spec->{$name} = 0;
+            next;
+        }
+        my $b = delete $TYPE{builtin};
+        my $v = delete $TYPE{vector};
+        # XXX alas, Params::Validate has no easy way for array element type
+        if ($v) {
+            $TYPE{type} = 'ARRAYREF';
+        }
+        elsif ($b) {
+            my $t = delete $TYPE{type};
+            if ($t eq 'true' or $t eq 'Bool') {
+                $TYPE{type} = 'BOOLEAN';
+            }
+            elsif ($t eq 'Object') {
+                $TYPE{type} = uc $t;
+            }
+            else {
+                $TYPE{type} = 'SCALAR';
+            }
+            # XXX do more proper checks, mb by 'callbacks'
+            my %valtype = (
+                string	=> { },
+                bytes	=> { },
+                int	=> { regex => qr/^\s*[-+]?\d{1,10}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
+                nat	=> { regex => qr/^\s*\d+\s*$/          , $DEFAULT_NUMBERS ? (default => 0) : () },
+                long	=> { regex => qr/^\s*[-+]?\d{1,19}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
+                int128	=> { },   # XXX
+                int256	=> { },   # XXX
+                double	=> {
+                    regex => qr/^\s*[-+]?(\d+|\.\d+|\d+\.\d*)([eE][-+]?\d+)?\s*$/,
+                    $DEFAULT_NUMBERS ? (default => 0) : ()
+                },
+                date	=> { },   # XXX wat? haven't seen such in schema
+            );
+            %TYPE = ( %TYPE, %{ $valtype{$t} } );
+        }
+        else {
+            my $baspkg = delete $TYPE{type};
+            $TYPE{isa} = $baspkg . 'ABC';
+        }
+
+        $spec->{$name} = { %TYPE };
+    }
+
+    # done
+    no strict 'refs';
+    ${"$class\::_VALSPEC"} = $spec;
+    return $spec;
+}
+
+sub validate
+{
+    my $self = shift;
+    my $class = ref $self;
+
+    my $spec = _val_spec($class);   # build new or get cached
+    my %p = validate_with(  # for optimized path inside by 'params'
+        params     => $self,
+        spec       => $spec,
+        stack_skip => 1,
+        # on_fail     => sub { # default is 'confess', probably enough for us
+    );
+    $self->{$_} = $p{$_} for grep { exists $spec->{$_}{default} } keys %$spec;
+}
+
+sub THAW
+{
+  my ($class, $serialiser, $val) = @_;
+  die "unsupported deserialiser $serialiser" unless $serialiser eq 'CBOR';
+  $class->new( %$val );
+}
+
+sub TO_CBOR
+{
+  my $self = shift;
+  CBOR::XS::tag(26, [ ref $self,
+    +{ (map { ($_ => $self->{$_}) } sort keys %$self) }
+  ])
 }
 
 sub pack_int
@@ -69,7 +182,7 @@ sub unpack_long
     unpack "q<", pack ("(a4)*", $lw, $hw);
 }
 
-sub pack_string
+sub pack_bytes
 {
     confess("undefined value") unless defined $_[0];
     local $_;
@@ -87,7 +200,7 @@ sub pack_string
     unpack "(a4)*";
 }
 
-sub unpack_string
+sub unpack_bytes
 {
     my $stream = shift;
     my $head = shift @$stream;
@@ -106,14 +219,16 @@ sub unpack_string
     return substr( $str, 0, $len );
 }
 
-sub pack_bytes
+sub pack_string
 {
-    return pack_string(@_);
+    my $b = $UTF8_STRINGS ? encode_utf8($_[0]) : $_[0];
+    return pack_bytes($b);
 }
 
-sub unpack_bytes
+sub unpack_string
 {
-    return unpack_string(@_);
+    my $s = unpack_bytes(@_);
+    return $UTF8_STRINGS ? decode_utf8($s, Encode::WARN_ON_ERR|Encode::FB_PERLQQ) : $s;
 }
 
 sub pack_int128
@@ -241,9 +356,10 @@ sub pack_true
 
 sub unpack_true
 {
-    return 1;
+    return bless(do {\( my $v = 1 )}, 'TL::True');
 }
 
+no warnings;
 package TL::False; sub TO_CBOR { do { bless \(my $o=1), Types::Serialiser::Boolean:: } }
 package TL::True;  sub TO_CBOR { do { bless \(my $o=0), Types::Serialiser::Boolean:: } }
 

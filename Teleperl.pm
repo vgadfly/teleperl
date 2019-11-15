@@ -148,7 +148,7 @@ sub _spawn_tg
 
     my %param = %{ $self->{_storage}->get('config') };
 
-    if ($dc) {
+    if ($dc && !($main && %{$self->{_config}}==0)) { # if ($dc) XXX tmp migrate when home_dc known but Getconfig not yet
         my @options = grep { $_->{id} == $dc } @{$self->{_config}{dc_options}};
 
         if (defined $param{proxy}) {
@@ -234,7 +234,7 @@ sub _run_filters
 {
     my ($self, $table, $data) = @_;
 
-    for my $rule ($self->{_filters}{$table}) {
+    for my $rule (@{ $self->{_filters}{$table} }) {
         if (my @res = $rule->{filter}->match($data)) {
             $self->event( $table . '_' . $rule->{name}, @res );
         }
@@ -571,7 +571,7 @@ sub fetch_file
                     $file{cb}->( error => $auth->{error_message} );
                 }
                 else {
-                    my $adc = $self->{_storage}-get(auth => "/dc");
+                    my $adc = $self->{_storage}->get(auth => "/dc");
                     $adc->{$file{dc}}->{exported} = $auth;
                     $roam->invoke(
                         Telegram::Auth::ImportAuthorization->new(

@@ -180,16 +180,10 @@ for my $type (@types) {
     print $f "  my \$self = fields::new( ref \$class || \$class );\n";
     print $f "  \$self->SUPER::new(\@_);\n}\n\n";
 
-    print $f "sub THAW\n{\n  my (\$class, \$serialiser, \$val) = \@_;\n";
-    print $f "  die \"unsupported deserialiser \$serialiser\" unless \$serialiser eq 'CBOR';\n";
-    print $f "  \$class->new( %\$val );\n}\n\n";
-
-    print $f "sub TO_CBOR\n{\n  my \$self = shift;\n";
-    print $f "  CBOR::XS::tag(26, [ '$pkg',\n    +{ (map { (\$_ => \$self->{\$_}) } sort keys %\$self) }\n  ])\n}\n\n";
-
     print $f "sub pack\n{\n";
     print $f "  my \$self = shift;\n";
     print $f "  my \@stream;\n";
+    print $f "  \$self->validate if \$TL::Object::VALIDATE & 1;\n";
     print $f "  local \$_;\n";
 
     print $f "  push \@stream, pack( 'L<', \$hash );\n";
@@ -248,7 +242,9 @@ for my $type (@types) {
         # XXX: TMP DEBUG
         #print $f "  print \"unpacking $arg->{name}\\n\";\n";
         if (exists $arg->{type}{vector}) {
-            print $f "  shift \@\$stream; #0x1cb5c415\n";
+            # as this is definitely synchronization loss earlier, check
+            # regardless of validation setting - connection should be aborted
+            print $f "  shift \@\$stream == 0x1cb5c415 or die 'expected vector'\n";
             print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
             # XXX: TMP DBG
             #print $f "  print \"  vector of size \$_\\n\";\n";
@@ -273,6 +269,7 @@ for my $type (@types) {
             print $f "  }\n";
         }
     }
+    print $f "  \$self->validate if \$TL::Object::VALIDATE & 2;\n";
     print $f "  return \$self;\n}\n\n";
     
     print $f "\n1;\n";

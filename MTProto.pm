@@ -221,7 +221,7 @@ sub start_session
 
     if (defined $self->{dcinstance}{permkey}{auth_key}) {
         my $fs = $self->{dcinstance}{future_salts};
-        if (defined $fs and $fs->isa('MTProto::FutureSalts')) {
+        if (defined $fs and ref $fs eq 'MTProto::FutureSalts') {
             for my $fusalt (@{ $fs->{salts} }) {
                 if ($fusalt->{valid_since} < AE::now and
                     $fusalt->{valid_until} > AE::now

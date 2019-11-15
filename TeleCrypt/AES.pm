@@ -1,4 +1,4 @@
-package Teleperl::Util;
+package TeleCrypt::AES;
 
 use Modern::Perl;
 use base 'Exporter';
