@@ -15,7 +15,7 @@ use AnyEvent::Log;
 # by going to infinite loop on init (subclasses() call); and we still
 # disable Safe later in # Data::DPath, so hack is here
 # (for reference, it worked on 5.20 with Safe 2.37 and Data::DPath::USE_SAFE=0)
-{ package Safe; sub new { bless {}, 'Safe' } sub AUTOLOAD {1 } }
+BEGIN { { package Safe; sub new { bless {}, 'Safe' } sub AUTOLOAD {1 } } }
 
 use Teleperl;
 use Teleperl::Storage;
