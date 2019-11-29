@@ -82,9 +82,9 @@ sub pkgname($$)
 sub _tmpl2vec($) {
     my $arg = shift;
 
-    if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
+    if ($arg->{type}{name} =~ '^([Vv])ector$' and exists $arg->{type}{t_args}) {
         $arg->{type}{name} = $arg->{type}{t_args}[0];
-        $arg->{type}{vector} = 1;
+        $arg->{type}{vector} = $1;
         delete $arg->{type}{template};
         delete $arg->{type}{t_args};
     }
@@ -205,7 +205,7 @@ for my $type (@types) {
             print $f "  if ( \$self->{$arg->{cond}{name}} & $arg->{cond}{bitmask} ) {\n";
         }
         if (exists $arg->{type}{vector}) {
-            print $f "  push \@stream, pack('L<', 0x1cb5c415);\n";
+            print $f "  push \@stream, pack('L<', 0x1cb5c415);\n" if $arg->{type}{vector} eq 'V';
             print $f "  push \@stream, pack('L<', scalar \@{\$self->{$arg->{name}}});\n";
             if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@stream, TL::Object::pack_$arg->{type}{name}( \$_ ) for \@{\$self->{$arg->{name}}};\n"
@@ -244,7 +244,8 @@ for my $type (@types) {
         if (exists $arg->{type}{vector}) {
             # as this is definitely synchronization loss earlier, check
             # regardless of validation setting - connection should be aborted
-            print $f "  shift \@\$stream == 0x1cb5c415 or die 'expected vector'\n";
+            print $f "  shift \@\$stream eq qq'\\x15\\xc4\\xb5\\x1c' or die 'expected Vector';\n"
+                if $arg->{type}{vector} eq 'V';
             print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
             # XXX: TMP DBG
             #print $f "  print \"  vector of size \$_\\n\";\n";
