@@ -253,6 +253,17 @@ for my $type (@types) {
             if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@_v, TL::Object::unpack_$arg->{type}{name}( \$stream ) while (\$_--);\n";
             }
+            elsif ($arg->{type}{name} =~ /^[a-z]/) {
+                # XXX docs: Bare type is a type whose values do not contain a
+                # constructor number, which is implied instead. A bare type
+                # identifier always coincides with the name of the implied
+                # constructor (and therefore, begins with a lowercase letter)
+                my @bares = grep { $_->{id} eq $arg->{type}{name} } @types;
+                die "bare count for $arg->{type}{name} is not 1" unless @bares == 1;
+                my (undef, $pkg) = pkgname($prefix, $bares[0]->{id});
+                print $f " BEGIN { require $pkg; }\n";
+                print $f "  push \@_v, $pkg\->unpack( \$stream ) while \$_--;\n";
+            }
             else {
                 print $f "  push \@_v, TL::Object::unpack_obj( \$stream ) while (\$_--); # $arg->{type}{name}\n";
             }
