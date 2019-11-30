@@ -95,7 +95,7 @@ sub _val_spec
                 date   => { },   # XXX wat? haven't ever seen such in schema
                 true   => { default => 0 },
                 Bool   => { $DEFAULT_NUMBERS ? (default => 0) : () }, # XXX check if ref?
-                Object => { isa => __PACKAGE__ },
+                Object => { } # isa => __PACKAGE__ TODO but Result may be Bool, should be thought later
             );
             %TYPE = ( %TYPE, %{ $valtype{$t} } );
         }
