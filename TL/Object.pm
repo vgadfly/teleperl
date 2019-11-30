@@ -65,18 +65,18 @@ sub _val_spec
         my $v = delete $TYPE{vector};
         # XXX alas, Params::Validate has no easy way for array element type
         if ($v) {
-            $TYPE{type} = 'ARRAYREF';
+            $TYPE{type} = ARRAYREF;
         }
         elsif ($b) {
             my $t = delete $TYPE{type};
             if ($t eq 'true' or $t eq 'Bool') {
-                $TYPE{type} = 'BOOLEAN';
+                $TYPE{type} = BOOLEAN;
             }
             elsif ($t eq 'Object') {
-                $TYPE{type} = uc $t;
+                $TYPE{type} = OBJECT;
             }
             else {
-                $TYPE{type} = 'SCALAR';
+                $TYPE{type} = SCALAR;
             }
             # XXX do more proper checks, mb by 'callbacks'
             my %valtype = (
