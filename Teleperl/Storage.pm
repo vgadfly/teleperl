@@ -323,8 +323,8 @@ sub new
 
     for my $state (keys %spec) {
         $self->{$state} = {};
-        my $instance = $spec{$state};
-        my $backend = shift @$instance;
+        my @instance = @{ $spec{$state} };
+        my $backend = shift @instance;
         my $handler = {
             'Storable'      => sub {
                 my @inst = @{ shift(@_) };
@@ -357,7 +357,7 @@ sub new
             memory => sub { 1 },
         }->{$backend};
         if ($handler) {
-            $handler->($instance, %arg);
+            $handler->([ @instance ], %arg);
         }
         else {
             die "Unsupported backend storage '$backend'";
