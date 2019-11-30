@@ -82,9 +82,9 @@ sub pkgname($$)
 sub _tmpl2vec($) {
     my $arg = shift;
 
-    if ($arg->{type}{name} =~ '^[Vv]ector$' and exists $arg->{type}{t_args}) {
+    if ($arg->{type}{name} =~ '^([Vv])ector$' and exists $arg->{type}{t_args}) {
         $arg->{type}{name} = $arg->{type}{t_args}[0];
-        $arg->{type}{vector} = 1;
+        $arg->{type}{vector} = $1;
         delete $arg->{type}{template};
         delete $arg->{type}{t_args};
     }
@@ -180,16 +180,10 @@ for my $type (@types) {
     print $f "  my \$self = fields::new( ref \$class || \$class );\n";
     print $f "  \$self->SUPER::new(\@_);\n}\n\n";
 
-    print $f "sub THAW\n{\n  my (\$class, \$serialiser, \$val) = \@_;\n";
-    print $f "  die \"unsupported deserialiser \$serialiser\" unless \$serialiser eq 'CBOR';\n";
-    print $f "  \$class->new( %\$val );\n}\n\n";
-
-    print $f "sub TO_CBOR\n{\n  my \$self = shift;\n";
-    print $f "  CBOR::XS::tag(26, [ '$pkg',\n    +{ (map { (\$_ => \$self->{\$_}) } sort keys %\$self) }\n  ])\n}\n\n";
-
     print $f "sub pack\n{\n";
     print $f "  my \$self = shift;\n";
     print $f "  my \@stream;\n";
+    print $f "  \$self->validate if \$TL::Object::VALIDATE & 1;\n";
     print $f "  local \$_;\n";
 
     print $f "  push \@stream, pack( 'L<', \$hash );\n";
@@ -211,10 +205,17 @@ for my $type (@types) {
             print $f "  if ( \$self->{$arg->{cond}{name}} & $arg->{cond}{bitmask} ) {\n";
         }
         if (exists $arg->{type}{vector}) {
-            print $f "  push \@stream, pack('L<', 0x1cb5c415);\n";
+            print $f "  push \@stream, pack('L<', 0x1cb5c415);\n" if $arg->{type}{vector} eq 'V';
             print $f "  push \@stream, pack('L<', scalar \@{\$self->{$arg->{name}}});\n";
             if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@stream, TL::Object::pack_$arg->{type}{name}( \$_ ) for \@{\$self->{$arg->{name}}};\n"
+            }
+            elsif ($arg->{type}{name} =~ /^[a-z]/) { # XXX see below in unpack
+                my @bares = grep { $_->{id} eq $arg->{type}{name} } @types;
+                die "bare count for $arg->{type}{name} is not 1" unless @bares == 1;
+                my (undef, $pkg) = pkgname($prefix, $bares[0]->{id});
+                print $f "  BEGIN { require $pkg; }\n";
+                print $f "  push \@stream, $pkg\->pack() for \@{\$self->{$arg->{name}}};\n";
             }
             else {
                 print $f "  push \@stream, \$_->pack() for \@{\$self->{$arg->{name}}};\n"
@@ -248,13 +249,27 @@ for my $type (@types) {
         # XXX: TMP DEBUG
         #print $f "  print \"unpacking $arg->{name}\\n\";\n";
         if (exists $arg->{type}{vector}) {
-            print $f "  shift \@\$stream; #0x1cb5c415\n";
+            # as this is definitely synchronization loss earlier, check
+            # regardless of validation setting - connection should be aborted
+            print $f "  shift \@\$stream eq qq'\\x15\\xc4\\xb5\\x1c' or die 'expected Vector';\n"
+                if $arg->{type}{vector} eq 'V';
             print $f "  \$_ = unpack 'L<', shift \@\$stream;\n";
             # XXX: TMP DBG
             #print $f "  print \"  vector of size \$_\\n\";\n";
             print $f "  \@_v = ();\n";
             if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@_v, TL::Object::unpack_$arg->{type}{name}( \$stream ) while (\$_--);\n";
+            }
+            elsif ($arg->{type}{name} =~ /^[a-z]/) {
+                # XXX docs: Bare type is a type whose values do not contain a
+                # constructor number, which is implied instead. A bare type
+                # identifier always coincides with the name of the implied
+                # constructor (and therefore, begins with a lowercase letter)
+                my @bares = grep { $_->{id} eq $arg->{type}{name} } @types;
+                die "bare count for $arg->{type}{name} is not 1" unless @bares == 1;
+                my (undef, $pkg) = pkgname($prefix, $bares[0]->{id});
+                print $f " BEGIN { require $pkg; }\n";
+                print $f "  push \@_v, $pkg\->unpack( \$stream ) while \$_--;\n";
             }
             else {
                 print $f "  push \@_v, TL::Object::unpack_obj( \$stream ) while (\$_--); # $arg->{type}{name}\n";
@@ -273,6 +288,7 @@ for my $type (@types) {
             print $f "  }\n";
         }
     }
+    print $f "  \$self->validate if \$TL::Object::VALIDATE & 2;\n";
     print $f "  return \$self;\n}\n\n";
     
     print $f "\n1;\n";

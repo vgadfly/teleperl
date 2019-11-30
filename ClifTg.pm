@@ -11,6 +11,17 @@ use AnyEvent::Impl::Perl;
 use AnyEvent;
 use AnyEvent::Log;
 
+# XXX CLI::Framework uses Class::Inspector which conflicts with Safe.pm
+# by going to infinite loop on init (subclasses() call); and we still
+# disable Safe later in # Data::DPath, so hack is here
+# (for reference, it worked on 5.20 with Safe 2.37 and Data::DPath::USE_SAFE=0)
+BEGIN {
+    { package Safe; our $VERSION = 'fake'; sub new { bless {}, 'Safe' }
+      sub AUTOLOAD {1}
+    }
+    $INC{'Safe.pm'} = 1;
+}
+
 use Teleperl;
 use Teleperl::Storage;
 
@@ -54,7 +65,7 @@ sub init {
     install_AE_log_crutch();
 
     my $stor = Teleperl::Storage->new(
-        dir         => $opts->{session}.
+        dir         => $opts->{session},
         configfile  => $opts->config
     );
     $app->cache->set( 'storage' => $stor );

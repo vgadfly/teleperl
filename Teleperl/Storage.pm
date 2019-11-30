@@ -356,8 +356,8 @@ sub new
               },
             memory => sub { 1 },
         }->{$backend};
-        if ($backend) {
-            $backend->($instance, %arg);
+        if ($handler) {
+            $handler->($instance, %arg);
         }
         else {
             die "Unsupported backend storage '$backend'";

@@ -16,6 +16,8 @@ Pure perl mtproto/telergam client library
 - Parse::Yapp
 - Math::Prime::Util
 - PBKDF2::Tiny
+- Params::Validate if app examples (their depends) are not used
+- Types::Serialiser (formerly part of CBOR::XS, unifies bools with JSON::*)
 
 For both interactive application's examples:
 - Getopt::Long::Descriptive

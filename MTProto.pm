@@ -221,7 +221,7 @@ sub start_session
 
     if (defined $self->{dcinstance}{permkey}{auth_key}) {
         my $fs = $self->{dcinstance}{future_salts};
-        if (defined $fs and $fs->isa('MTProto::FutureSalts')) {
+        if (defined $fs and ref $fs eq 'MTProto::FutureSalts') {
             for my $fusalt (@{ $fs->{salts} }) {
                 if ($fusalt->{valid_since} < AE::now and
                     $fusalt->{valid_until} > AE::now
@@ -757,11 +757,14 @@ sub _handle_msg
         }
         elsif ($m->{object}->isa('MTProto::MsgDetailedInfoABC')) {
             $self->event( error => bless(
-                { error_message =>"Unhandled MsgDetailedInfo" },
+                {
+                    error_message =>"Unhandled MsgDetailedInfo",
+                    original_message => $m->{object}
+                },
                 'MTProto::Error'
                 )
             );
-            $self->_state('fatal');
+            AE::log error => "implement me! " .Dumper($m->{object});
             return;
         }
         else {
