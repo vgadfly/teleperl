@@ -757,11 +757,14 @@ sub _handle_msg
         }
         elsif ($m->{object}->isa('MTProto::MsgDetailedInfoABC')) {
             $self->event( error => bless(
-                { error_message =>"Unhandled MsgDetailedInfo" },
+                {
+                    error_message =>"Unhandled MsgDetailedInfo",
+                    original_message => $m->{object}
+                },
                 'MTProto::Error'
                 )
             );
-            $self->_state('fatal');
+            AE::log error => "implement me! " .Dumper($m->{object});
             return;
         }
         else {

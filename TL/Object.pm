@@ -77,23 +77,23 @@ sub _val_spec
             }
             else {
                 $TYPE{type} = SCALAR;
+                # XXX do more proper checks, mb by 'callbacks'
+                my %valtype = (
+                    string => { },
+                    bytes  => { },
+                    int    => { regex => qr/^\s*[-+]?\d{1,10}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
+                    nat    => { regex => qr/^\s*\d+\s*$/          , $DEFAULT_NUMBERS ? (default => 0) : () },
+                    long   => { regex => qr/^\s*[-+]?\d{1,19}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
+                    int128 => { },   # XXX
+                    int256 => { },   # XXX
+                    double => {
+                        regex => qr/^\s*[-+]?(\d+|\.\d+|\d+\.\d*)([eE][-+]?\d+)?\s*$/,
+                        $DEFAULT_NUMBERS ? (default => 0) : ()
+                    },
+                    date	=> { },   # XXX wat? haven't seen such in schema
+                );
+                %TYPE = ( %TYPE, %{ $valtype{$t} } );
             }
-            # XXX do more proper checks, mb by 'callbacks'
-            my %valtype = (
-                string	=> { },
-                bytes	=> { },
-                int	=> { regex => qr/^\s*[-+]?\d{1,10}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
-                nat	=> { regex => qr/^\s*\d+\s*$/          , $DEFAULT_NUMBERS ? (default => 0) : () },
-                long	=> { regex => qr/^\s*[-+]?\d{1,19}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
-                int128	=> { },   # XXX
-                int256	=> { },   # XXX
-                double	=> {
-                    regex => qr/^\s*[-+]?(\d+|\.\d+|\d+\.\d*)([eE][-+]?\d+)?\s*$/,
-                    $DEFAULT_NUMBERS ? (default => 0) : ()
-                },
-                date	=> { },   # XXX wat? haven't seen such in schema
-            );
-            %TYPE = ( %TYPE, %{ $valtype{$t} } );
         }
         else {
             my $baspkg = delete $TYPE{type};
@@ -121,7 +121,7 @@ sub validate
         stack_skip => 1,
         # on_fail     => sub { # default is 'confess', probably enough for us
     );
-    $self->{$_} = $p{$_} for grep { exists $spec->{$_}{default} } keys %$spec;
+    $self->{$_} = $p{$_} for grep { ref $spec->{$_} && exists $spec->{$_}{default} } keys %$spec;
 }
 
 sub THAW
