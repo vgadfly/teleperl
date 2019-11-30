@@ -15,6 +15,7 @@ use Data::Dumper;
 
 use Encode qw(/utf8/ :fallback_all);
 use Params::Validate qw(!:DEFAULT :types validate_with);
+use Types::Serialiser;
 
 =head1 SYNOPSYS
 
@@ -70,30 +71,33 @@ sub _val_spec
         elsif ($b) {
             my $t = delete $TYPE{type};
             if ($t eq 'true' or $t eq 'Bool') {
-                $TYPE{type} = BOOLEAN;
+                $TYPE{type} = BOOLEAN | SCALARREF;
             }
             elsif ($t eq 'Object') {
                 $TYPE{type} = OBJECT;
             }
             else {
                 $TYPE{type} = SCALAR;
-                # XXX do more proper checks, mb by 'callbacks'
-                my %valtype = (
-                    string => { },
-                    bytes  => { },
-                    int    => { regex => qr/^\s*[-+]?\d{1,10}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
-                    nat    => { regex => qr/^\s*\d+\s*$/          , $DEFAULT_NUMBERS ? (default => 0) : () },
-                    long   => { regex => qr/^\s*[-+]?\d{1,19}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
-                    int128 => { },   # XXX
-                    int256 => { },   # XXX
-                    double => {
-                        regex => qr/^\s*[-+]?(\d+|\.\d+|\d+\.\d*)([eE][-+]?\d+)?\s*$/,
-                        $DEFAULT_NUMBERS ? (default => 0) : ()
-                    },
-                    date	=> { },   # XXX wat? haven't seen such in schema
-                );
-                %TYPE = ( %TYPE, %{ $valtype{$t} } );
             }
+            # XXX do more proper checks, mb by 'callbacks'
+            my %valtype = (
+                string => { },
+                bytes  => { },
+                int    => { regex => qr/^\s*[-+]?\d{1,10}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
+                nat    => { regex => qr/^\s*\d+\s*$/          , $DEFAULT_NUMBERS ? (default => 0) : () },
+                long   => { regex => qr/^\s*[-+]?\d{1,19}\s*$/, $DEFAULT_NUMBERS ? (default => 0) : () },
+                int128 => { },   # XXX
+                int256 => { },   # XXX
+                double => {
+                    regex => qr/^\s*[-+]?(\d+|\.\d+|\d+\.\d*)([eE][-+]?\d+)?\s*$/,
+                    $DEFAULT_NUMBERS ? (default => 0) : ()
+                },
+                date   => { },   # XXX wat? haven't ever seen such in schema
+                true   => { default => 0 },
+                Bool   => { $DEFAULT_NUMBERS ? (default => 0) : () }, # XXX check if ref?
+                Object => { isa => __PACKAGE__ },
+            );
+            %TYPE = ( %TYPE, %{ $valtype{$t} } );
         }
         else {
             my $baspkg = delete $TYPE{type};
@@ -329,8 +333,8 @@ sub unpack_obj
         #warn "left: ".join(",", map { sprintf("0x%x", $_ ) } map { unpack( "L<", $_ ) } @$stream);
         return $obj;
     }
-    return bless(do {\( my $v = 0 )}, 'TL::False') if ($hash == 0xbc799737); # boolFalse
-    return bless(do {\( my $v = 1 )}, 'TL::True') if ($hash == 0x997275b5); # boolTrue
+    return $Types::Serialiser::false if ($hash == 0xbc799737); # boolFalse
+    return Types::Serialiser::true() if ($hash == 0x997275b5); # boolTrue
 
     warn "unknown object type: 0x".sprintf("%x", $hash);
     return undef;
@@ -338,7 +342,7 @@ sub unpack_obj
 
 sub pack_Bool
 {
-    return ( $_[0] ? 0x997275b5 : 0xbc799737 );
+    return ( 0+$_[0] ? 0x997275b5 : 0xbc799737 );
 }
 
 sub unpack_Bool
@@ -346,7 +350,7 @@ sub unpack_Bool
     my $stream = shift;
     my $bool = unpack( "L<", shift @$stream );
 
-    return ($bool == 0x997275b5);
+    return ($bool == 0x997275b5 ? $Types::Serialiser::true : $Types::Serialiser::false);
 }
 
 sub pack_true
@@ -356,11 +360,7 @@ sub pack_true
 
 sub unpack_true
 {
-    return bless(do {\( my $v = 1 )}, 'TL::True');
+    return $Types::Serialiser::true;
 }
-
-no warnings;
-package TL::False; sub TO_CBOR { do { bless \(my $o=1), Types::Serialiser::Boolean:: } }
-package TL::True;  sub TO_CBOR { do { bless \(my $o=0), Types::Serialiser::Boolean:: } }
 
 1;
