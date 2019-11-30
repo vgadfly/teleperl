@@ -210,6 +210,13 @@ for my $type (@types) {
             if (exists $builtin{$arg->{type}{name}} and $arg->{type}{name} ne 'Object') {
                 print $f "  push \@stream, TL::Object::pack_$arg->{type}{name}( \$_ ) for \@{\$self->{$arg->{name}}};\n"
             }
+            elsif ($arg->{type}{name} =~ /^[a-z]/) { # XXX see below in unpack
+                my @bares = grep { $_->{id} eq $arg->{type}{name} } @types;
+                die "bare count for $arg->{type}{name} is not 1" unless @bares == 1;
+                my (undef, $pkg) = pkgname($prefix, $bares[0]->{id});
+                print $f "  BEGIN { require $pkg; }\n";
+                print $f "  push \@stream, $pkg\->pack() for \@{\$self->{$arg->{name}}};\n";
+            }
             else {
                 print $f "  push \@stream, \$_->pack() for \@{\$self->{$arg->{name}}};\n"
             }
