@@ -251,7 +251,7 @@ Unix time_t of when C<cdnconfig> was received (updated).
 =cut
 
 use Config::Tiny;
-use Storable qw( nstore retrieve freeze thaw );
+use Storable qw( nstore retrieve freeze thaw dclone );
 use File::Spec;
 use Data::DPath qw(dpath dpathr);
 $Data::DPath::USE_SAFE = 0; # or it will not see our classes O_o
@@ -285,8 +285,8 @@ my $DEF_SESS = {
 };
 
 our %DEFAULT_SPEC = (
-    session     => [ 'Storable', 'session.dat', 1,    0, \&DEF_SESS ],
-    auth        => [ 'Storable', 'auth.dat',    0, 0600, \&DEF_AUTH ],
+    session     => [ 'Storable', 'session.dat', 1,    0, $DEF_SESS ],
+    auth        => [ 'Storable', 'auth.dat',    0, 0600, $DEF_AUTH ],
     cache       => [ 'Storable', '$1.dat',      1       ],
     update_state=> [ 'Storable', 'upd.dat',     1       ],
     config      => [ 'Config::Tiny', "teleperl.conf", { arg => 'configfile' }],
@@ -339,7 +339,7 @@ sub new
                     $self->{$state} = retrieve $file;
                 }
                 elsif (my $defaults = $inst[3]) {
-                    $self->{$state} = $inst[3];
+                    $self->{$state} = dclone $inst[3];
                 }
               },
             'Config::Tiny'  => sub {
@@ -350,9 +350,7 @@ sub new
                     my $arg = $inst[1]->{arg};
                     $file = $args{$arg} if defined $arg;
                 }
-                $file = File::Spec->catfile($prefix, $file);
-
-                $self->{$state} = Config::Tiny->read($file);
+                $self->{$state} = Config::Tiny->read($file) // {};
               },
             memory => sub { 1 },
         }->{$backend};
@@ -365,12 +363,13 @@ sub new
     }
 
     # XXX to be deprecated
-    $self->{files} = $prefix . ( $arg{files} // 'file_cache/' );
-    if ( $self->{files} =~ m@/$@ ) {
+    my $files = $arg{files} // 'file_cache/';
+    $self->{files} = File::Spec->catfile( $prefix, $files );
+    if ( $files =~ m@/$@ ) {
+        $self->{files} .= "/";
+        mkdir $prefix unless -d $prefix;
         mkdir $self->{files} unless -d $self->{files}
     }
-
-    $self->_migrate2019fall() unless $self->{_migrated};
 
     return $self;
 }
@@ -395,6 +394,8 @@ sub save
             $file =~ s/\$1/$state/;
         }
         $file = File::Spec->catfile($prefix, $file);
+        say "saving $state to $file";
+        say Dumper $self->{$state};
         $flags{$state} = $instance[1] unless defined $flags{$state};
 
         nstore ( $self->{$state}, $file ) 
@@ -419,108 +420,6 @@ sub get
     return wantarray
         ? $filter->match( $self->{$namespace})
         : $filter->matchr($self->{$namespace})->[0];
-}
-
-# XXX remove in December, until that add here when formats change
-sub _migrate2019fall
-{
-    my $self = shift;
-
-    ## from 9c67c3eb96   Sep 06
-    # handle old mtp session
-    if ($self->{session}{mtproto}{session_id}) {
-        my $instance = {};
-        my @instance_keys = qw(auth_key auth_key_id auth_key_aux salt);
-        my $session = {};
-        my $mts = $self->{session}{mtproto};
-
-        @$instance{@instance_keys} = @$mts{@instance_keys};
-        $session->{id} = $mts->{session_id};
-        $session->{seq} = $mts->{seq};
-
-        $self->{session}{mtproto}{instance} = $instance;
-        $self->{session}{mtproto}{session} = $session;
-
-        delete $self->{session}{mtproto}{session_id};
-    }
-
-    ## from bdc1c99b31   Sep 24 -> four files
-    if ($self->{session}{update_state}) {
-        $self->{update_state} = delete $self->{session}{update_state};
-    }
-    if ($self->{session}{users}) {
-        $self->{cache}{users} = delete $self->{session}{users};
-    }
-    if ($self->{session}{chats}) {
-        $self->{cache}{chats} = delete $self->{session}{chats};
-    }
-    $self->{cache}{self_id} = $self->{session}{self_id}
-        if $self->{session}{self_id} and not $self->{cache}{self_id};
-    if ($self->{session}{mtproto}) {
-        $self->{auth} = delete $self->{session}{mtproto}{instance};
-        my $mtsession = delete $self->{session}{mtproto}{session};
-        $self->{session} = {
-            %{ $self->{session} },
-            %$mtsession,
-        };
-        delete $self->{session}{mtproto};
-    }
-
-    ## from 1fe6cd374b   Oct 05 -> MTProto: instance -> keys
-    # but nothing changed at backend
-
-    ## Oct 08 - new per-DC (hopefully) stable structure
-    # XXX need to know home_dc for proper convert! so may be need to
-    # run two times, first we'll get Config, second we'll convert
-    # XXX do guesses
-    if (my @adcs = grep { /^\d+$/ } keys %{ $self->{auth} }) {
-        $self->{session}{home_dc} = shift @adcs
-            if not $self->{session}{home_dc} and scalar(@adcs) == 1;
-    }
-    $self->{session}{home_dc} = $ENV{TELEPERL_HOME_DC} if not $self->{session}{home_dc};
-    $self->{session}{home_dc} = 2
-        if not $self->{session}{home_dc} && $self->{config}{user}{phone} =~ /^\+7/;
-    if (not $self->{session}{home_dc}) {
-        $self->{session}{home_dc} = undef;
-        die "comment this & set DC config to convert!";
-    }
-    if ($self->{session}{id}) {
-        my $home_dc = delete $self->{session}{home_dc};
-        my $config  = delete $self->{session}{config} // {};
-        my %mtp_sess = %{ $self->{session} };
-        my %instance = %{ $self->{auth} };
-        my $salt = delete $instance{salt};
-        delete $mtp_sess{home_dc};
-        delete $mtp_sess{self_id};
-        for (grep { /^\d+$/ } keys %{ $self->{auth} }) {
-            $self->{auth}{dc}{$_}{permkey} = delete $self->{auth}{$_};
-        }
-        $self->{auth}{dc}{$home_dc} = {
-                permkey => {
-                    %instance,
-                },
-                tempkey => {},
-                salt    => $salt,
-                future_salts => {},
-            } if $home_dc;
-        $self->{session} = {
-            self_id         => $self->{cache}{self_id},
-            home_dc         => $home_dc,
-            main_session_id => $mtp_sess{id},
-            sessions        => {
-                qq{$home_dc} => [
-                    { %mtp_sess, time => 1570499041 },
-                    { id => 'nonexist', seq => 0, time => 123 },
-                ],
-            },
-            config          => $config,
-            cdnconfig       => {},
-            cdnconfig_time  => 0,
-        };
-    }
-
-    # add new farts here
-    $self->{_migrated} = 20191010;
 }
 
 1;
