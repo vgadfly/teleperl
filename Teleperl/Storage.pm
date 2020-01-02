@@ -286,7 +286,7 @@ my $DEF_SESS = {
 
 our %DEFAULT_SPEC = (
     session     => [ 'Storable', 'session.dat', 1,    0, $DEF_SESS ],
-    auth        => [ 'Storable', 'auth.dat',    0, 0600, $DEF_AUTH ],
+    auth        => [ 'Storable', 'auth.dat',    1, 0600, $DEF_AUTH ],
     cache       => [ 'Storable', '$1.dat',      1       ],
     update_state=> [ 'Storable', 'upd.dat',     1       ],
     config      => [ 'Config::Tiny', "teleperl.conf", { arg => 'configfile' }],
@@ -351,6 +351,11 @@ sub new
                     $file = $args{$arg} if defined $arg;
                 }
                 $self->{$state} = Config::Tiny->read($file) // {};
+                $file = File::Spec->catfile( $prefix, $file );
+                my $local = Config::Tiny->read($file) // {};
+                for my $k ( keys %$local ) {
+                    $self->{$state}{$k} = $local->{$k}
+                }
               },
             memory => sub { 1 },
         }->{$backend};
