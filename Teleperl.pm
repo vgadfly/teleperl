@@ -606,7 +606,7 @@ sub send_text_message
 
     $msg->{peer} = $peer;
 
-    $self->invoke( $msg ) if defined $peer;
+    $self->invoke( $msg, $arg{cb} ) if defined $peer;
 }
 
 sub _cache_users
