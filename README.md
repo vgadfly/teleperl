@@ -5,7 +5,8 @@ Pure perl mtproto/telergam client library
 - Modern::Perl
 - Config::Tiny
 - AnyEvent
-- IO::Socket::Socks
+- Object::Event
+- Data::DPath
 - Data::Validate::IP
 - NetAddr::IP
 - Crypt::OpenSSL::Bignum
@@ -14,6 +15,7 @@ Pure perl mtproto/telergam client library
 - Crypt::OpenSSL::AES
 - Parse::Yapp
 - Math::Prime::Util
+- PBKDF2::Tiny
 
 For both interactive application's examples:
 - Getopt::Long::Descriptive
@@ -35,7 +37,6 @@ For GUI application (currently minimal almost unusable quick & dirty proof-of-wo
 
 Not required in minimal run (optional for extra features), but may be moved to core in future:
 - CBOR::XS
-- Data::DPath
 
 Not yet used but discussed:
 - Template::Toolkit

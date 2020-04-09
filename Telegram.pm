@@ -9,6 +9,7 @@ package Telegram;
 =cut
 
 use Modern::Perl;
+use Data::DPath 'dpath';
 use Data::Dumper;
 use Carp;
 
@@ -43,20 +44,22 @@ use Telegram::Messages::SendMessage;
 use Telegram::InputPeer;
 
 use base 'Class::Stateful';
-use fields qw(
+use fields qw( _filters
     _mt _dc _app _proxy _timer _first _req _lock _flood_timer _queue _upd 
-    reconnect session auth keepalive noupdate force_new_session
+    reconnect session tempkey authdc keepalive noupdate force_new_session
 );
 
 # args: DC, proxy and stuff
 sub new
 {
-    my @args = qw( noupdate keepalive reconnect force_new_session session auth );
+    my @args = qw( noupdate keepalive reconnect force_new_session session authdc tempkey );
     my ($class, %arg) = @_;
     my $self = fields::new( ref $class || $class );
     $self->SUPER::new( 
         init => undef,
         connecting => undef,
+        sendtempkey => undef,
+        waittempkey => undef,
         connected => [ 
             sub { 
                 $self->_dequeue;
@@ -78,6 +81,7 @@ sub new
 
     @$self{@args} = @arg{@args};
 
+    $self->{_filters} = { raw => [ { name => 'msg', filter => dpath('/') } ] };
     $self->{_first} = 1;
     $self->{_lock} = 1;
 
@@ -127,48 +131,95 @@ sub _mt
     my $mt = MTProto->new( 
             socket => $aeh, 
             session => ( $force_new ? {} : $self->{session} ),
-            keys => $self->{auth}, 
+            dcinstance => $self->{authdc}, 
     );
     $self->{_mt} = $mt;
     
     $mt->reg_cb( state => sub { 
             shift; AE::log debug => "MTP state @_";
             if ($_[0] eq 'session_ok') {
-                $self->_state('connected');
+                $self->_state($self->{tempkey} ? 'sendtempkey' : 'connected');
             }
     } );
     $mt->reg_cb( fatal => sub { shift; AE::log warn => "MTP fatal @_" } );
     $mt->reg_cb( message => sub { shift; $self->_msg_cb(@_) } );
     $mt->reg_cb( error => sub { shift; $self->_error_cb(@_) } );
 
-    $mt->start_session;
+    $mt->reg_cb( bad_salt => sub {
+            shift;
+            AE::log debug => "requesting future salts";
+            $self->{_mt}->invoke( [
+                    MTProto::GetFutureSalts->new( num => 9 ),
+                    # fire and forget, errors here are uncritical
+            ] );
+            $self->register_filter_event('raw',
+                future_salts => "//.[isa('MTProto::FutureSalts')]"
+            );
+    } );
 
+    $self->reg_cb( raw_future_salts => sub {
+            shift;
+            AE::log debug => "got future salts event";
+            $self->{authdc}{future_salts} = $_[0];
+    } );
+
+    $mt->start_session;
 }
 
 sub _real_invoke
 {
-    my ( $self, $query, $cb ) = @_;
+    my ( $self, $query, $cb, %param ) = @_;
+    my $id_cb = delete $param{on_send};
+    my $ack_cb = delete $param{on_ack};
     $self->{_mt}->invoke( [ $query, 
         sub {
-            my $req_id = shift;
-            $self->{_req}{$req_id}{query} = $query;
-            $self->{_req}{$req_id}{cb} = $cb if defined $cb;
-            AE::log debug => "invoked $req_id for " . ref $query;
-            $self->event('after_invoke', $req_id, $query, $cb);
+            my ($req_id, $when) = @_;
+            AE::log debug => "invoke ($when) $req_id for " . ref $query;
+            if ($when eq 'push') {
+                $self->{_req}{$req_id}{$_} = $param{$_} for keys %param;
+                $self->{_req}{$req_id}{query} = $query;
+                $self->{_req}{$req_id}{cb} = $cb if defined $cb;
+                $self->event('raw_after_invoke', $req_id, $query, $cb, $id_cb, %param);
+                $id_cb->($req_id) if defined $id_cb;
+            }
+            elsif ($when eq 'ack') {
+                $self->event('raw_after_ack', $req_id, $query, $cb, $ack_cb);
+                $ack_cb->($req_id) if defined $ack_cb;
+            }
         } 
     ] );
 }
 
-## layer wrapper
+## layer and other cranks wrapper
 
 sub invoke
 {
-    my ($self, $query, $res_cb, $service) = @_;
+    my ($self, $query, $res_cb, %param) = @_;
     my $req_id;
 
-    Carp::confess unless defined $query;
-    AE::log info => "invoke: " . ref $query;
-    AE::log trace => Dumper $query;
+    {   # argument check
+        Carp::confess "empty query" unless defined $query;
+        my $class = ref $query;
+        my $tl_type = (grep {
+            exists $_->{func} and $_->{class} eq $class
+            } (values %Telegram::ObjTable::tl_type, values %MTProto::ObjTable::tl_type) # XXX disallow MTProto?
+        )[0];
+        Carp::confess "query of type $class is not amongst compiled schema functions"
+            unless defined $tl_type;
+        if ($query->isa('Telegram::Auth::BindTempAuthKey') or exists $tl_type->{bang}) {
+            AE::log error => "%s TL API function can't be freely invoked by user, fix %s", $class, Carp::longmess;
+            return;
+        }
+        AE::log info => "invoke: " . $class;
+        AE::log trace => Dumper $query;
+        # XXX crutch here if $tl_type->{returns} = Updates ?
+    }
+
+    # docs says:
+    # The helper method invokeWithLayer can be used only together with initConnection
+    # ....
+    # initConnection must also be called after each auth.bindTempAuthKey
+    # thus the latter is handled as sepaarte state, even before _first
     if ($self->{_first}) {
         AE::log debug => "first, using wrapper";
         my $inner = $query;
@@ -182,34 +233,53 @@ sub invoke
                 system_lang_code => 'en',
                 lang_pack => '',
                 lang_code => 'en',
-                query => $inner
+                query => $inner,
+                # TODO report proxy somewhere in future after MTProxy support...
         );
         $query = Telegram::InvokeWithLayer->new( layer => 91, query => $conn ); 
         $self->{_first} = 0;
     }
-    elsif ( $self->{noupdate} ) {
+    elsif ( $self->{noupdate} || $param{noupdate} ) {
         $query = Telegram::InvokeWithoutUpdates->new( query => $query );
     }
-    if ($self->{_lock} and not $service) {
-        $self->_enqueue( $query, $res_cb );
+
+    # GDPR export
+    if (my $range = delete $param{with_range}) {
+        $query = Telegram::InvokeWithMessagesRange->new( range => $range, query => $query );
+    }
+    if (my $takid = delete $param{with_takeout}) {
+        $query = Telegram::InvokeWithTakeout->new( takeout_id => $takid, query => $query );
+    }
+    # XXX TODO what is the order of invokeWithTakeout / invokeWithMessagesRange
+    # relative to AfterMsg(s) and each other? is it right?
+    if (my $msg_id = delete $param{after_msg}) {
+        $query = Telegram::InvokeAfterMsg->new( msg_id => $msg_id, query => $query );
+    }
+    elsif (my $msg_ids = delete $param{after_msgs}) {
+        $query = Telegram::InvokeAfterMsgs->new( msg_ids => $msg_ids, query => $query );
+    }
+
+    # finally query is wrapped as needed
+    if ($self->{_lock} and not $param{noqueue}) {
+        $self->_enqueue( $query, $res_cb, %param );
     }
     else {
-        $self->_real_invoke( $query, $res_cb );
+        $self->_real_invoke( $query, $res_cb, %param );
     }
 }
 
 sub _enqueue
 {
-    my ($self, $query, $cb) = @_;
+    my $self = shift;
     AE::log debug => "session locked, enqueue";
-    push @{$self->{_queue}}, [$query, $cb];
+    push @{$self->{_queue}}, [@_];
 }
 
 sub _dequeue
 {
     my $self = shift;
     local $_;
-    $self->_real_invoke($_->[0], $_->[1]) while ( $_ = shift @{$self->{_queue}} );
+    $self->_real_invoke(@$_) while ( $_ = shift @{$self->{_queue}} );
     $self->{_lock} = 0;
 }
 
@@ -218,6 +288,14 @@ sub flush
     my $self = shift;
     $self->{_queue} = [];
     $self->_state('connected');
+}
+
+sub cancel
+{
+    my ($self, $req_id) = @_;
+    AE::log debug => "Cancelling request $req_id";
+    delete $self->{_req}{$req_id};
+    $self->{_mt}->rpc_drop_answer($req_id);
 }
 
 sub _handle_rpc_result
@@ -229,7 +307,7 @@ sub _handle_rpc_result
     AE::log debug => "Got result %s for $req_id", ref $res->{result};
     
     # Updates in result
-    $self->event( update => $res->{result} )
+    $self->event( update => $res->{result}, result_of => $self->{_req}{$req_id}{query} )
         if ( $res->{result}->isa('Telegram::UpdatesABC') );
 
     # Errors
@@ -318,6 +396,8 @@ sub _msg_cb
     AE::log info => "%s %s", ref $msg, (exists $msg->{object} ? ref($msg->{object}) : '');
     AE::log trace => Dumper $msg->{object};
 
+    $self->_run_filters(raw => $msg);
+
     # RpcResults
     $self->_handle_rpc_result( $msg->{object} )
         if ( $msg->{object}->isa('MTProto::RpcResult') );
@@ -346,6 +426,31 @@ sub _get_timer_cb
         $self->{_mt}->invoke( [ MTProto::Ping->new( ping_id => rand(2**31) ) ] ) 
             if $self->{keepalive};
     }
+}
+
+## process filters from specified table and emit events
+sub _run_filters
+{
+    my ($self, $table, $data) = @_;
+
+    for my $rule ($self->{_filters}{$table}) {
+        if (my @res = $rule->{filter}->match($data)) {
+            $self->event( $table . '_' . $rule->{name}, @res );
+        }
+    }
+}
+
+## allow user add new filters to table
+sub register_filter_event {
+    my ($self, $table, $evname, $expression) = @_;
+
+    # XXX TODO support more tables?
+    die "unsupported filter table" unless $table eq 'raw';
+
+    push @{ $self->{_filters}{$table} }, +{
+            name    => $evname,
+            filter  => dpath($expression),
+        };
 }
 
 1;
