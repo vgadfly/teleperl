@@ -29,6 +29,7 @@ use Telegram::Auth::ExportAuthorization;
 use Telegram::Auth::ImportAuthorization;
 use Telegram::Auth::CheckPassword;
 use Telegram::InputCheckPasswordSRP;
+use Telegram::Auth::ImportBotAuthorization;
 
 use Telegram::Account::GetPassword;
 use TeleCrypt::SRP;
@@ -38,10 +39,27 @@ use Telegram::Peer;
 
 use Telegram::InputFileLocation;
 use Telegram::Upload::GetFile;
+use Telegram::Upload::SaveFilePart;
+use Telegram::Upload::SaveBigFilePart;
+use Telegram::Messages::SendMedia;
+use Telegram::InputFile;
+use Telegram::InputPeer;
+use Telegram::InputMedia;
+use Telegram::InputPhoto;
+
+use Telegram::Messages::SetInlineBotResults;
+use Telegram::Messages::UploadMedia;
+use Telegram::InputBotInlineResult;
+use Telegram::InputBotInlineMessage;
+
+use Digest::MD5 qw(md5);
+use IO::File;
 
 sub new
 {
     my ($self, %arg) = @_;
+
+    AE::log trace => "Teleperl::new( %s )", Dumper \%arg;
 
     $self = bless( {}, $self ) unless ref $self;
     $self->init_object_events;
@@ -49,6 +67,7 @@ sub new
     my $new_session = $arg{force_new_session} // 0;
     AE::log debug => "force_new_session?=".$new_session;
     $self->{_force_new_session} = $new_session;
+    $self->{_bot_token} = $arg{bot_token};
 
     croak("Teleperl::Storage required")
         unless defined $arg{storage} and $arg{storage}->isa('Teleperl::Storage');
@@ -68,13 +87,16 @@ sub new
     $self->{_upd}->reg_cb( update => sub { shift; $self->_handle_update(@_) } );
     $self->{_upd}->reg_cb( message => sub { shift; $self->_handle_message(@_) } );
 
-    if ( not defined $arg{online} or $arg{online} ) {
-        my $interval = $arg{online_interval} // 60;
-        $self->{_online_timer} = AE::timer 0, $interval, sub { $self->update_status };
+    unless (defined $self->{_bot_token}) {
+        AE::log trace => "bot token not specified, starting update_status timer";
+        if ( not defined $arg{online} or $arg{online} ) {
+            my $interval = $arg{online_interval} // 60;
+            $self->{_online_timer} = AE::timer 0, $interval, sub { $self->update_status };
+        }
     }
-
     $self->{_file_part_size} = 2 ** 19;
     $self->{autofetch} = $arg{autofetch} // 0;
+
     return $self;
 }
 
@@ -137,7 +159,8 @@ sub _spawn_tg
         force_new_session => $self->{_force_new_session},
         keepalive => 1,
         auth => $dc_auth,
-        session => ($main and $dc) ? $self->{_storage}->mt_session : {}
+        session => ($main and $dc) ? $self->{_storage}->mt_session : {},
+        bot => defined $self->{_bot_token} ? 1 : undef
     );
     
     if ($main) {
@@ -156,6 +179,17 @@ sub _spawn_tg
         $tg->reg_cb( state => sub { shift; $self->event( 'tg_state', @_ ) } );
 
         $tg->reg_cb( migrate => sub { shift; $self->_migrate(@_) } );
+    }
+    if ($self->{_bot_token}) {
+        AE::log debug => "Import Bot Auth %s", $self->{_bot_token};
+        my $bot_auth = Telegram::Auth::ImportBotAuthorization->new(
+            flags => 0,
+            api_id => $param{app}{api_id},
+            api_hash => $param{app}{api_hash},
+            bot_auth_token => $self->{_bot_token},
+        );
+        # XXX: handle errors
+        $tg->invoke( $bot_auth );
     }
     return $tg;
 }
@@ -212,6 +246,12 @@ sub _handle_update
         $m->{to_id} = Telegram::PeerChat->new(chat_id => $update->{chat_id});
         
         $self->_handle_message($m);
+    }
+    elsif ($update->isa('Telegram::UpdateBotInlineQuery')){
+        $self->event( 'query', 
+                inline => 1, id => $update->{query_id},
+                query => $update->{query}, user_id => $update->{user_id}
+        );
     }
 
     # XXX
@@ -550,6 +590,124 @@ sub _fetch_file_part
     ); 
 }
 
+sub upload_media
+{
+    my ($self, $type, $file, $cb) = @_;
+
+    $self->_upload_file( filename => $file, cb => sub 
+        {
+            if ($type eq 'photo') {
+                my $q = 
+                    Telegram::Messages::UploadMedia->new(
+                        peer => Telegram::InputPeerSelf->new,
+                        media => Telegram::InputMediaUploadedPhoto->new(
+                            file => $_[0]
+                        )
+                    )
+                ;
+		# AE::log debug => "UploadMedia %s", Dumper($q);
+                $self->invoke( $q,
+                    sub {
+                        # MessageMedia
+                        my $media = @_[0];
+                        say ref $media;
+                        if ($media->isa('Telegram::MessageMediaABC') and defined $cb) {
+                            $cb->($media);
+                        }
+                    }
+                );
+            }
+        }
+    );
+}
+
+sub _upload_file
+{
+    my ($self, %farg) = @_;
+    
+    my $roam = $self->_spawn_tg( $self->{_config}{home_dc}, 0 );
+    $roam->start;
+     
+    my $file = {
+        id => int(rand(2**31)),
+        md => Digest::MD5->new,
+        size => -s $farg{filename},
+        partsize => $self->{_file_part_size} // 2 ** 19,
+    };
+    $file->{total_parts} = int( ($file->{size} + $file->{partsize} - 1) / $file->{partsize} );
+
+
+    if ($file->{size}) {
+        $file->{handle} = IO::File->new($farg{filename}) or return; # XXX: error callback
+        AE::log trace => "upload file %s", Dumper($file);
+        $self->_upload_file_part( $roam, $file, 0, sub 
+            {
+                close $file->{handle};
+                my $file = $file->{size} < 10 * 2 ** 20 ? 
+                    Telegram::InputFile->new(
+                        id => $file->{id},
+                        parts => $file->{total_parts},
+                        name => $farg{filename},
+                        md5_checksum => $file->{md}->digest()
+                    ) :
+                    Telegram::InputFileBig->new(
+                        id => $file->{id},
+                        parts => $file->{total_parts},
+                        name => $farg{filename},
+                    );
+
+                $farg{cb}->($file) if defined $farg{cb};
+            }
+        );
+    }
+}
+
+sub _upload_file_part
+{
+    my ($self, $tg, $file, $part, $cb ) = @_;
+    AE::log trace => "upload %s (%d)", Dumper($file), $part;
+    my $sizeleft = $file->{size} - $part * $file->{partsize};
+    my $size = $sizeleft < $file->{partsize} ? $sizeleft : $file->{partsize};
+   
+    # upload complete
+    if ($sizeleft <= 0) {
+        $cb->() if defined $cb;
+        return;
+    }
+
+    my $data;
+    # XXX: error handling
+    $file->{handle}->read( $data, $size ) or return;
+
+    $file->{md}->add($data);
+    
+    my $q = ($file->{size} < 10 * 2 ** 20) ? 
+        Telegram::Upload::SaveFilePart->new(
+            file_id => $file->{id},
+            file_part => $part,
+            bytes => $data
+        ) 
+        : 
+        Telegram::Upload::SaveBigFilePart->new(
+            file_id => $file->{id},
+            file_part => $part,
+            file_total_parts => $file->{total_parts},
+            bytes => $data
+        );
+
+    $tg->invoke( $q,
+        sub {
+            unless ($_[0]->isa('MTProto::RpcError')) {
+                AE::log debug => "part $part/$file->{total_parts} uploaded";
+                return $self->_upload_file_part( $tg, $file, $part+1, $cb );
+            }
+            else {
+                AE::log warning => "uploading part $part/$file->{total_parts} failed";
+            }
+        }
+    );
+}
+
 # XXX: compatability methods, to be deprecated
 sub peer_name
 {
@@ -620,5 +778,49 @@ sub _cache_chats
     my ($self, @chats) = @_;
     $self->{_cache}->_cache_chats(@chats);
 }
+
+sub send_inline_results
+{
+    my ($self, %results) = @_;
+    my @tg_results;
+
+    for my $result ( $results{results}->@* ) {
+        if ($result->[0] eq 'text') {
+            my $msg = $result->[1]{message};
+            AE::log trace => "pushing inline result text <<%s>>", $msg;
+
+            push @tg_results, Telegram::InputBotInlineResult->new(
+                id => $result->[1]{id},
+                type => 'article',
+                title => substr($msg, 0, 16),
+                send_message => Telegram::InputBotInlineMessageText->new(
+                    message => $msg
+                )
+            ) if $msg;
+        }
+        elsif ($result->[0] eq 'photo') {
+            push @tg_results, Telegram::InputBotInlineResultPhoto->new(
+                id => $result->[1]{id},
+                type => 'photo',
+                photo => Telegram::InputPhoto->new(
+                    id => $result->[1]{photo_id},
+                    access_hash => $result->[1]{access_hash},
+                    file_reference => $result->[1]{file_reference}
+                ),
+                send_message => Telegram::InputBotInlineMessageMediaAuto->new(
+                    message => ''
+                )
+            );
+        }
+    }
+
+    $self->invoke( Telegram::Messages::SetInlineBotResults->new(
+            query_id => $results{query_id},
+            cache_time => $results{cache_time} // 0,
+            results => [ @tg_results ]
+        ) );
+
+}
+
 1;
 

@@ -211,9 +211,14 @@ sub _handle_update
         $upd->isa('Telegram::UpdateNewMessage') or
         $upd->isa('Telegram::UpdateEditMessage') or
         $upd->isa('Telegram::UpdateDeleteMessages') or 
-        $upd->isa('Telegram::UpdateWebPage') 
+        $upd->isa('Telegram::UpdateWebPage')
     ) {
         $pts_good = $self->_check_pts( $upd->{pts}, $upd->{pts_count} );
+    }
+    if (
+        $upd->isa('Telegram::UpdateBotInlineQuery')
+    ) {
+        $pts_good = 1;
     }
 
     if ($pts_good) {

@@ -44,7 +44,7 @@ use Telegram::InputPeer;
 
 use base 'Class::Stateful';
 use fields qw(
-    _mt _dc _app _proxy _timer _first _req _lock _flood_timer _queue _upd 
+    _mt _dc _app _proxy _timer _first _req _lock _flood_timer _queue _upd _bot 
     reconnect session auth keepalive noupdate force_new_session
 );
 
@@ -75,6 +75,7 @@ sub new
     $self->{_dc} = $arg{dc};
     $self->{_proxy} = $arg{proxy};
     $self->{_app} = $arg{app};
+    $self->{_bot} = $arg{bot};
 
     @$self{@args} = @arg{@args};
 
@@ -153,7 +154,11 @@ sub _real_invoke
             my $req_id = shift;
             $self->{_req}{$req_id}{query} = $query;
             $self->{_req}{$req_id}{cb} = $cb if defined $cb;
-            AE::log debug => "invoked $req_id for " . ref $query;
+	    my $query_class = ref $query;
+	    if ($query->isa('Telegram::InvokeWithLayer')) {
+                $query_class = ref $query->{query} . " (with layer $query->{layer})";
+	    }
+            AE::log debug => "invoked $req_id for " . $query_class .':'. ref $query;
             $self->event('after_invoke', $req_id, $query, $cb);
         } 
     ] );
@@ -169,6 +174,10 @@ sub invoke
     Carp::confess unless defined $query;
     AE::log info => "invoke: " . ref $query;
     AE::log trace => Dumper $query;
+#    if ($self->{_bot}) {
+#        my $inner = $query;
+#	$query = Telegram::InvokeWithLayer->new( layer => 91, query => $inner ); 
+#    }
     if ($self->{_first}) {
         AE::log debug => "first, using wrapper";
         my $inner = $query;
@@ -226,7 +235,12 @@ sub _handle_rpc_result
 
     my $req_id = $res->{req_msg_id};
     my $defer = 0;
-    AE::log debug => "Got result %s for $req_id", ref $res->{result};
+    my $req_class = ref $self->{_req}{$req_id}{query};
+    if ($req_class eq 'Telegram::InvokeWithLayer') {
+        my $req = $self->{_req}{$req_id}{query};
+        $req_class .= "($req->{layer}):".ref $req->{query};
+    }
+    AE::log debug => "Got result %s for $req_id (%s)", ref $res->{result}, $req_class;
     
     # Updates in result
     $self->event( update => $res->{result} )
